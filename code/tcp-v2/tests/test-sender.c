@@ -1,31 +1,71 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+// Include types first so nrf_t is defined
+#include "nrf.h"
+#include "types.h"
+
+// Now define our mock function (after nrf_t is defined)
+static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, unsigned nbytes);
+
+// Here's the key part: UNDEFINE the original function first, then redefine it
+#undef nrf_send_noack
+#define nrf_send_noack mock_nrf_send_noack
+
+// Now include the rest of the headers
+#include "bytestream.h"
+#include "rcp-datagram.h"
 #include "sender.h"
-
-// Mock NRF for testing
-typedef struct mock_nrf {
-    // Any state needed for the mock
-    int dummy;
-} mock_nrf_t;
-
-mock_nrf_t mock_nrf_init() {
-    mock_nrf_t nrf = {0};
-    return nrf;
-}
+#include "tcp.h"
 
 // Track the last segment transmitted
 static sender_segment_t last_segment;
 static int segment_count = 0;
 
-// Mock transmit callback for sender
-static void mock_transmit(tcp_peer_t *peer, sender_segment_t *segment) {
-    printk("Mock transmit: seqno=%u, len=%u, is_syn=%d, is_fin=%d: %s\n", segment->seqno,
-           segment->len, segment->is_syn, segment->is_fin, segment->payload);
+// Define our mock NRF structure
+typedef struct mock_nrf {
+    int dummy;
+} mock_nrf_t;
 
-    // Save a copy of the segment for later inspection
-    memcpy(&last_segment, segment, sizeof(sender_segment_t));
-    segment_count++;
+mock_nrf_t *mock_nrf_init(void) {
+    mock_nrf_t *nrf = kmalloc(sizeof(mock_nrf_t));
+    memset(nrf, 0, sizeof(mock_nrf_t));
+    return nrf;
+}
+
+// Implementation of our mock function
+static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, unsigned nbytes) {
+    printk("Mock nrf_send_noack: addr=%u, nbytes=%u\n", txaddr, nbytes);
+
+    // If this is a datagram, try to capture info about what was sent
+    if (nbytes >= RCP_HEADER_LENGTH) {
+        rcp_datagram_t datagram = rcp_datagram_init();
+        if (rcp_datagram_parse(&datagram, msg, nbytes) > 0) {
+            // Check for SYN or FIN flags
+            if (rcp_has_flag(&datagram.header, RCP_FLAG_FIN)) {
+                printk("Detected FIN flag in outgoing packet\n");
+                // Create a copy of the segment for later inspection
+                sender_segment_t seg = rcp_to_sender_segment(&datagram);
+                memcpy(&last_segment, &seg, sizeof(sender_segment_t));
+                last_segment.is_fin = true;
+                segment_count++;
+            } else if (rcp_has_flag(&datagram.header, RCP_FLAG_SYN)) {
+                printk("Detected SYN flag in outgoing packet\n");
+                sender_segment_t seg = rcp_to_sender_segment(&datagram);
+                memcpy(&last_segment, &seg, sizeof(sender_segment_t));
+                last_segment.is_syn = true;
+                segment_count++;
+            } else if (datagram.header.payload_len > 0) {
+                // Regular data packet
+                sender_segment_t seg = rcp_to_sender_segment(&datagram);
+                memcpy(&last_segment, &seg, sizeof(sender_segment_t));
+                segment_count++;
+            }
+        }
+    }
+
+    return nbytes;
 }
 
 // Test sender functionality
@@ -33,11 +73,16 @@ static void test_sender(void) {
     printk("--------------------------------\n");
     printk("Starting sender test...\n");
 
-    // Initialize mock NRF
-    mock_nrf_t mock_nrf = mock_nrf_init();
+    // Define local and remote addresses
+    const uint8_t LOCAL_ADDR = 1;
+    const uint8_t REMOTE_ADDR = 2;
 
-    // Initialize sender
-    sender_t sender = sender_init((nrf_t *)&mock_nrf, mock_transmit, NULL);
+    // Initialize mock NRF
+    mock_nrf_t *mock_nrf = mock_nrf_init();
+    assert(mock_nrf != NULL);
+
+    // Initialize sender with the updated function signature
+    sender_t sender = sender_init((nrf_t *)mock_nrf, LOCAL_ADDR, REMOTE_ADDR);
     printk("Sender initialized\n");
 
     // Write test data to the sender's bytestream
@@ -112,7 +157,9 @@ static void test_sender(void) {
     assert(sender.n_retransmits > 0);
     printk("Retransmission counter: %u\n", sender.n_retransmits);
 
-    printk("Checking that an RTO that doesn't trigger a retransmission doesn't trigger a retransmission...\n");
+    printk(
+        "Checking that an RTO that doesn't trigger a retransmission doesn't trigger a "
+        "retransmission...\n");
     sender.rto_time_us = timer_get_usec() + S_TO_US(10);  // Set RTO time to future
     sender.n_retransmits = 0;
     sender_check_retransmits(&sender);
@@ -133,22 +180,42 @@ static void test_sender(void) {
     printk("Pushing data until all bytes and FIN are sent...\n");
     printk("Total bytes to send: %u\n", total_bytes);
 
-    // Keep calling sender_push until all data is sent and FIN is observed
+    // Keep pushing data until we observe the FIN
     bool fin_observed = false;
-    uint16_t remaining_space = sender.acked_seqno + sender.window_size - sender.next_seqno;
-    while (remaining_space) {
-        sender_push(&sender);
-        remaining_space = sender.acked_seqno + sender.window_size - sender.next_seqno;
-        printk("  Pushed data... next_seqno: %u, remaining_space: %u, bytes_popped: %u\n",
-               sender.next_seqno, remaining_space, bs_bytes_popped(&sender.reader));
 
+    // Keep track of the next_seqno to detect when a FIN is sent
+    uint16_t prev_seqno = sender.next_seqno;
+
+    while (!fin_observed) {
+        sender_push(&sender);
+
+        // Check our mock send function's captured data
         if (last_segment.is_fin) {
             fin_observed = true;
-            printk("FIN flag observed on (seqno=%u)\n", last_segment.seqno);
+            printk("FIN flag observed on segment with seqno=%u\n", last_segment.seqno);
         }
 
-        if (!bs_bytes_available(&sender.reader)) {
-            printk("No more data to push\n");
+        printk("  Pushed data... next_seqno: %u, bytes_available: %u, bytes_popped: %u\n",
+               sender.next_seqno, bs_bytes_available(&sender.reader),
+               bs_bytes_popped(&sender.reader));
+
+        // If we've pushed all data and the sequence number increased without more data,
+        // that might be the FIN. Let's check one more time.
+        if (bs_reader_finished(&sender.reader) && !bs_bytes_available(&sender.reader) &&
+            sender.next_seqno > prev_seqno && !fin_observed) {
+            printk("Detected possible FIN (seqno increased without more data)\n");
+            sender_push(&sender);  // One more push to make sure we send FIN
+
+            if (last_segment.is_fin) {
+                fin_observed = true;
+                printk("FIN flag confirmed on segment with seqno=%u\n", last_segment.seqno);
+            }
+        }
+
+        prev_seqno = sender.next_seqno;
+
+        // Safety check to avoid infinite loop
+        if (prev_seqno > len + strlen(more_data) + 10) {
             break;
         }
     }

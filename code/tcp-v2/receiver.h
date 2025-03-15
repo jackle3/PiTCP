@@ -2,20 +2,18 @@
 
 #include "bytestream.h"
 #include "nrf.h"
+#include "router.h"
 #include "types.h"
 
-/* Forward declarations for segment types */
-typedef struct sender_segment sender_segment_t;
-typedef struct receiver_segment receiver_segment_t;
-typedef struct tcp_peer tcp_peer_t;
-
-/* Function pointer type for transmitting segments back to sender */
-typedef void (*receiver_transmit_fn_t)(tcp_peer_t *peer, receiver_segment_t *segment);
+/********* TYPES *********/
 
 /* Receiver state structure */
 typedef struct receiver {
-    nrf_t *nrf;          /* Receiver's NRF interface (to receive segments) */
+    nrf_t *nrf;          /* NRF interface for sending replies (ACKs/window updates) */
     bytestream_t writer; /* Receiver writes to it, app reads from it */
+
+    uint8_t local_addr;  /* Local RCP address */
+    uint8_t remote_addr; /* Remote RCP address */
 
     char reasm_buffer[MAX_WINDOW_SIZE];  /* Buffer for reassembled data */
     bool reasm_bitmask[MAX_WINDOW_SIZE]; /* Bitmask to track received segments */
@@ -23,18 +21,49 @@ typedef struct receiver {
     uint32_t total_size; /* Total bytes received */
     bool syn_received;   /* Whether a SYN has been received */
     bool fin_received;   /* Whether a FIN has been received */
-
-    receiver_transmit_fn_t transmit; /* Callback to send ACKs to the remote peer */
-    tcp_peer_t *peer;                /* Pointer to the TCP peer containing this receiver */
 } receiver_t;
 
-/* Forward declarations for functions */
-static inline receiver_t receiver_init(nrf_t *nrf, receiver_transmit_fn_t transmit,
-                                       tcp_peer_t *peer);
-static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *data, size_t len,
-                                bool is_last);
-static inline uint16_t reasm_bytes_pending(receiver_t *receiver);
-static inline void recv_process_segment(receiver_t *receiver, sender_segment_t *segment);
+/********* HELPER FUNCTIONS *********/
+
+/**
+ * Convert a receiver segment to an RCP datagram
+ *
+ * @param receiver Pointer to the receiver containing addressing information
+ * @param segment Pointer to the receiver segment to convert
+ * @return An RCP datagram containing the converted data
+ */
+rcp_datagram_t receiver_segment_to_rcp(receiver_t *receiver, receiver_segment_t *segment) {
+    assert(receiver);
+    assert(segment);
+
+    rcp_datagram_t datagram = rcp_datagram_init();
+
+    /* Set the source and destination addresses */
+    datagram.header.src = receiver->local_addr;
+    datagram.header.dst = receiver->remote_addr;
+
+    /* Set the ACK flag if needed */
+    if (segment->is_ack) {
+        rcp_set_flag(&datagram.header, RCP_FLAG_ACK);
+    }
+
+    /* Set the acknowledgment number */
+    datagram.header.ackno = segment->ackno;
+
+    /* Set the window size */
+    datagram.header.window = segment->window_size;
+
+    /* Zero out the unused fields (for the sending message) */
+    datagram.header.seqno = 0;
+    datagram.header.payload_len = 0;
+
+    /* Compute the checksum over header only (no payload) */
+    rcp_datagram_compute_checksum(&datagram);
+
+    return datagram;
+}
+
+/********* RECEIVER *********/
 
 /**
  * Initialize the receiver with default state
@@ -44,8 +73,7 @@ static inline void recv_process_segment(receiver_t *receiver, sender_segment_t *
  * @param peer Pointer to the TCP peer containing this receiver
  * @return Initialized receiver structure
  */
-static inline receiver_t receiver_init(nrf_t *nrf, receiver_transmit_fn_t transmit,
-                                       tcp_peer_t *peer) {
+receiver_t receiver_init(nrf_t *nrf, uint8_t local_addr, uint8_t remote_addr) {
     receiver_t receiver = {
         .nrf = nrf,
         .writer = bs_init(),
@@ -54,8 +82,8 @@ static inline receiver_t receiver_init(nrf_t *nrf, receiver_transmit_fn_t transm
         .total_size = 0,
         .fin_received = false,
         .syn_received = false,
-        .transmit = transmit,
-        .peer = peer,
+        .local_addr = local_addr,
+        .remote_addr = remote_addr,
     };
     return receiver;
 }
@@ -69,8 +97,7 @@ static inline receiver_t receiver_init(nrf_t *nrf, receiver_transmit_fn_t transm
  * @param len The length of the data to insert
  * @param is_last Whether the segment is the last segment (FIN)
  */
-static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *data, size_t len,
-                                bool is_last) {
+void reasm_insert(receiver_t *receiver, size_t first_idx, char *data, size_t len, bool is_last) {
     assert(receiver);
     assert(data);
 
@@ -142,7 +169,7 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
  * @param receiver The receiver to check
  * @return The number of bytes pending in the reassembler
  */
-static inline uint16_t reasm_bytes_pending(receiver_t *receiver) {
+uint16_t reasm_bytes_pending(receiver_t *receiver) {
     assert(receiver);
 
     uint16_t bytes_pending = 0;
@@ -155,12 +182,41 @@ static inline uint16_t reasm_bytes_pending(receiver_t *receiver) {
 }
 
 /**
+ * Callback function for transmitting ACK replies
+ *
+ * @param peer The peer that will transmit the reply to its remote peer
+ * @param segment The reply to transmit
+ */
+void transmit_reply(receiver_t *receiver, receiver_segment_t *segment) {
+    assert(receiver);
+    assert(segment);
+
+    /* We always use the sender's NRF to send messages out */
+    nrf_t *sender_nrf = receiver->nrf;
+
+    /* Get the next hop NRF address from the routing table */
+    uint8_t src_rcp = receiver->local_addr;
+    uint8_t dst_rcp = receiver->remote_addr;
+    uint32_t next_hop_nrf = rtable_map[src_rcp][dst_rcp];
+
+    /* Convert the receiver_segment_t to a rcp_datagram_t */
+    rcp_datagram_t datagram = receiver_segment_to_rcp(receiver, segment);
+
+    /* Serialize the datagram */
+    uint8_t buffer[RCP_TOTAL_SIZE];
+    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
+
+    /* Send the reply to the next hop NRF address */
+    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
+}
+
+/**
  * Process a segment from the sender
  *
  * @param receiver The receiver to process the segment
  * @param segment The segment to process
  */
-static inline void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
+void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
     assert(receiver);
     assert(segment);
 
@@ -198,5 +254,5 @@ static inline void recv_process_segment(receiver_t *receiver, sender_segment_t *
         .window_size = window_size,
     };
 
-    receiver->transmit(receiver->peer, &ack);
+    transmit_reply(receiver, &ack);
 }

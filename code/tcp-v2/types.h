@@ -1,11 +1,7 @@
 #pragma once
 
 #include "rcp-datagram.h"
-
-// Forward declarations
-typedef struct tcp_peer tcp_peer_t;
-typedef struct sender sender_t;
-typedef struct receiver receiver_t;
+#include <stdbool.h>
 
 typedef struct receiver_segment {
     uint16_t ackno;        // Sequence number of the ACK

@@ -3,12 +3,10 @@
 #include "bytestream.h"
 #include "nrf.h"
 #include "queue-ext-T.h"
+#include "router.h"
 #include "types.h"
 
-/* Forward declarations for segment types */
-typedef struct tcp_peer tcp_peer_t;
-typedef struct sender_segment sender_segment_t;
-typedef struct receiver_segment receiver_segment_t;
+/********* TYPES *********/
 
 /* Initial window size and timeout constants */
 #define INITIAL_WINDOW_SIZE 1024
@@ -29,13 +27,13 @@ typedef struct rtq {
 /* Generate queue functions for the retransmission queue */
 gen_queue_T(rtq, rtq_t, head, tail, unacked_segment_t, next);
 
-/* Function pointer type for transmitting segments to receiver */
-typedef void (*sender_transmit_fn_t)(tcp_peer_t *peer, sender_segment_t *segment);
-
 /* Sender state structure */
 typedef struct sender {
-    nrf_t *nrf;          /* Sender's NRF interface for sending segments */
+    nrf_t *nrf;          /* NRF interface for sending segments */
     bytestream_t reader; /* App writes data to it, sender reads from it */
+
+    uint8_t local_addr;  /* Local RCP address */
+    uint8_t remote_addr; /* Remote RCP address */
 
     uint16_t next_seqno;  /* Next sequence number to send */
     uint16_t acked_seqno; /* Sequence number of the highest acked segment */
@@ -44,34 +42,66 @@ typedef struct sender {
     rtq_t pending_segs;      /* Queue of segments that have been sent but not yet acked */
     uint32_t initial_RTO_us; /* Initial RTO (in microseconds) */
     uint32_t rto_time_us;    /* Time when earliest outstanding segment will be retransmitted */
-    uint32_t
-        n_retransmits; /* Number of times the earliest outstanding segment has been retransmitted */
-
-    sender_transmit_fn_t transmit; /* Callback to send segments to the remote peer */
-    tcp_peer_t *peer;              /* Pointer to the TCP peer containing this sender */
+    uint32_t n_retransmits;  /* Number of times earliest outstanding segment has retransmitted */
 } sender_t;
 
-/* Function forward declarations */
-static inline sender_t sender_init(nrf_t *nrf, sender_transmit_fn_t transmit, tcp_peer_t *peer);
-static inline sender_segment_t make_segment(sender_t *sender, size_t len);
-static inline void sender_send_segment(sender_t *sender, sender_segment_t seg);
-static inline void sender_push(sender_t *sender);
-static inline void sender_process_reply(sender_t *sender, receiver_segment_t *reply);
-static inline void sender_check_retransmits(sender_t *sender);
+/********* HELPER FUNCTIONS *********/
 
-/* External functions needed */
-extern uint32_t timer_get_usec(void);
-extern void *kmalloc(size_t size);
+/**
+ * Convert a sender segment to an RCP datagram
+ *
+ * @param sender Pointer to the sender containing addressing information
+ * @param segment Pointer to the sender segment to convert
+ * @return An RCP datagram containing the converted data
+ */
+rcp_datagram_t sender_segment_to_rcp(sender_t *sender, sender_segment_t *segment) {
+    assert(sender);
+    assert(segment);
+
+    rcp_datagram_t datagram = rcp_datagram_init();
+
+    /* Set the source and destination addresses */
+    datagram.header.src = sender->local_addr;
+    datagram.header.dst = sender->remote_addr;
+
+    /* Set the flags */
+    if (segment->is_syn) {
+        rcp_set_flag(&datagram.header, RCP_FLAG_SYN);
+    }
+
+    if (segment->is_fin) {
+        rcp_set_flag(&datagram.header, RCP_FLAG_FIN);
+    }
+
+    /* Set the sequence number */
+    datagram.header.seqno = segment->seqno;
+
+    /* Set the payload (only if there is data to send) */
+    if (segment->len > 0) {
+        rcp_datagram_set_payload(&datagram, segment->payload, segment->len);
+    }
+
+    /* Zero out the unused fields (for the receiving message) */
+    datagram.header.ackno = 0;
+    datagram.header.window = 0;
+
+    /* Compute the checksum over header and payload */
+    rcp_datagram_compute_checksum(&datagram);
+
+    return datagram;
+}
+
+/********* SENDER *********/
 
 /**
  * Initialize the sender with default state
  *
  * @param nrf NRF interface for sending data
- * @param transmit Function to transmit segments to the receiver
- * @param peer Pointer to the TCP peer containing this sender
+ * @param local_addr Local RCP address
+ * @param remote_addr Remote RCP address
  * @return Initialized sender structure
  */
-static inline sender_t sender_init(nrf_t *nrf, sender_transmit_fn_t transmit, tcp_peer_t *peer) {
+sender_t sender_init(nrf_t *nrf, uint8_t local_addr, uint8_t remote_addr) {
     sender_t sender = {
         .nrf = nrf,
         .reader = bs_init(),
@@ -81,8 +111,8 @@ static inline sender_t sender_init(nrf_t *nrf, sender_transmit_fn_t transmit, tc
         .initial_RTO_us = RTO_INITIAL_US,
         .rto_time_us = 0,
         .n_retransmits = 0,
-        .transmit = transmit,
-        .peer = peer,
+        .local_addr = local_addr,
+        .remote_addr = remote_addr,
     };
     rtq_init(&sender.pending_segs);
     return sender;
@@ -95,7 +125,7 @@ static inline sender_t sender_init(nrf_t *nrf, sender_transmit_fn_t transmit, tc
  * @param len The maximum length of the data to send
  * @return The created segment
  */
-static inline sender_segment_t make_segment(sender_t *sender, size_t len) {
+sender_segment_t make_segment(sender_t *sender, size_t len) {
     assert(sender);
 
     sender_segment_t seg = {
@@ -119,16 +149,45 @@ static inline sender_segment_t make_segment(sender_t *sender, size_t len) {
 }
 
 /**
+ * Callback function for transmitting segments
+ *
+ * @param sender The sender that will transmit the segment to its remote peer
+ * @param segment The segment to transmit
+ */
+void transmit_segment(sender_t *sender, sender_segment_t *segment) {
+    assert(sender);
+    assert(segment);
+
+    /* We always use the sender's NRF to send messages out */
+    nrf_t *sender_nrf = sender->nrf;
+
+    /* Get the next hop NRF address from the routing table */
+    uint8_t src_rcp = sender->local_addr;
+    uint8_t dst_rcp = sender->remote_addr;
+    uint32_t next_hop_nrf = rtable_map[src_rcp][dst_rcp];
+
+    /* Convert the sender_segment_t to a rcp_datagram_t */
+    rcp_datagram_t datagram = sender_segment_to_rcp(sender, segment);
+
+    /* Serialize the datagram */
+    uint8_t buffer[RCP_TOTAL_SIZE];
+    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
+
+    /* Send the segment to the next hop NRF address */
+    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
+}
+
+/**
  * Send a segment to the remote peer
  *
  * @param sender The sender to send the segment from
  * @param seg The segment to send
  */
-static inline void sender_send_segment(sender_t *sender, sender_segment_t seg) {
+void sender_send_segment(sender_t *sender, sender_segment_t seg) {
     assert(sender);
 
     // Send the segment to the remote peer
-    sender->transmit(sender->peer, &seg);
+    transmit_segment(sender, &seg);
 
     // Only track segments with data, SYN, or FIN
     if (seg.len > 0 || seg.is_syn || seg.is_fin) {
@@ -166,7 +225,7 @@ static inline void sender_send_segment(sender_t *sender, sender_segment_t seg) {
  *
  * @param sender The sender to push data from
  */
-static inline void sender_push(sender_t *sender) {
+void sender_push(sender_t *sender) {
     assert(sender);
 
     // If FIN has been sent, no more data can be pushed
@@ -205,7 +264,7 @@ static inline void sender_push(sender_t *sender) {
  * @param sender The sender to process the reply for
  * @param reply The reply segment from the receiver
  */
-static inline void sender_process_reply(sender_t *sender, receiver_segment_t *reply) {
+void sender_process_reply(sender_t *sender, receiver_segment_t *reply) {
     assert(sender);
     assert(reply);
 
@@ -257,7 +316,7 @@ static inline void sender_process_reply(sender_t *sender, receiver_segment_t *re
  *
  * @param sender The sender to check for retransmits
  */
-static inline void sender_check_retransmits(sender_t *sender) {
+void sender_check_retransmits(sender_t *sender) {
     assert(sender);
 
     // Only check if there are pending segments and the timer has expired
@@ -266,7 +325,7 @@ static inline void sender_check_retransmits(sender_t *sender) {
     if (time_since_rto >= 0 && !rtq_empty(&sender->pending_segs)) {
         // Retransmit the oldest unacknowledged segment
         unacked_segment_t *seg = rtq_start(&sender->pending_segs);
-        sender->transmit(sender->peer, &seg->seg);
+        transmit_segment(sender, &seg->seg);
 
         // Update retransmission timer - use exponential backoff if window is nonzero
         if (sender->window_size) {

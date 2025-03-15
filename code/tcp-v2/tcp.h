@@ -1,93 +1,64 @@
 #pragma once
 
 #include "receiver.h"
-#include "router.h"
 #include "sender.h"
-#include "util.h"
+
+/********* TYPES *********/
 
 /* TCP peer structure representing a connection endpoint */
 typedef struct tcp_peer {
     sender_t sender;     /* Sender component of the connection */
     receiver_t receiver; /* Receiver component of the connection */
 
-    uint8_t local_addr;  /* Local RCP address */
-    uint8_t remote_addr; /* Remote RCP address */
-
     uint32_t time_of_last_receipt;    /* Time when last packet was received */
     bool linger_after_streams_finish; /* Whether to linger after streams finish */
 } tcp_peer_t;
 
-/* Forward declarations for all functions */
-static inline void transmit_segment(tcp_peer_t *peer, sender_segment_t *segment);
-static inline void transmit_reply(tcp_peer_t *peer, receiver_segment_t *segment);
-static inline tcp_peer_t tcp_peer_init(nrf_t *sender_nrf, nrf_t *receiver_nrf, uint8_t local_addr,
-                                       uint8_t remote_addr);
-static inline void tcp_tick(tcp_peer_t *peer);
-static inline void tcp_check_incoming(tcp_peer_t *peer);
-static inline void tcp_send_pending(tcp_peer_t *peer);
-static inline void tcp_check_timeouts(tcp_peer_t *peer);
-static inline size_t tcp_write(tcp_peer_t *peer, const uint8_t *data, size_t len);
-static inline size_t tcp_read(tcp_peer_t *peer, uint8_t *data, size_t len);
-static inline bool tcp_has_data(tcp_peer_t *peer);
-static inline void tcp_close(tcp_peer_t *peer);
-static inline bool tcp_is_active(tcp_peer_t *peer);
-static inline bool tcp_receive_closed(tcp_peer_t *peer);
+/********* HELPER FUNCTIONS *********/
 
 /**
- * Callback function for transmitting segments
+ * Convert an RCP datagram to a sender segment
  *
- * @param peer The peer that will transmit the segment to its remote peer
- * @param segment The segment to transmit
+ * @param datagram Pointer to the RCP datagram to convert
+ * @return A sender segment structure containing the converted data
  */
-static inline void transmit_segment(tcp_peer_t *peer, sender_segment_t *segment) {
-    assert(peer);
-    assert(segment);
+sender_segment_t rcp_to_sender_segment(rcp_datagram_t *datagram) {
+    assert(datagram);
 
-    /* We always use the sender's NRF to send messages out */
-    nrf_t *sender_nrf = peer->sender.nrf;
+    sender_segment_t seg = {
+        .seqno = datagram->header.seqno,
+        .is_syn = rcp_has_flag(&datagram->header, RCP_FLAG_SYN),
+        .is_fin = rcp_has_flag(&datagram->header, RCP_FLAG_FIN),
+        .len = datagram->header.payload_len,
+    };
 
-    /* Get the next hop NRF address from the routing table */
-    uint8_t dst_rcp = peer->remote_addr;
-    uint32_t next_hop_nrf = rtable_map[dst_rcp][0];
+    /* Copy payload if present */
+    if (datagram->payload && datagram->header.payload_len > 0) {
+        memcpy(seg.payload, datagram->payload, seg.len);
+    }
 
-    /* Convert the sender_segment_t to a rcp_datagram_t */
-    rcp_datagram_t datagram = sender_segment_to_rcp(peer, segment);
-
-    /* Serialize the datagram */
-    uint8_t buffer[RCP_TOTAL_SIZE];
-    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
-
-    /* Send the segment to the next hop NRF address */
-    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
+    return seg;
 }
 
 /**
- * Callback function for transmitting ACK replies
+ * Convert an RCP datagram to a receiver segment
  *
- * @param peer The peer that will transmit the reply to its remote peer
- * @param segment The reply to transmit
+ * @param datagram Pointer to the RCP datagram to convert
+ * @return A receiver segment structure containing the converted data
  */
-static inline void transmit_reply(tcp_peer_t *peer, receiver_segment_t *segment) {
-    assert(peer);
-    assert(segment);
+receiver_segment_t rcp_to_receiver_segment(rcp_datagram_t *datagram) {
+    assert(datagram);
 
-    /* We always use the sender's NRF to send messages out */
-    nrf_t *sender_nrf = peer->sender.nrf;
+    receiver_segment_t seg = {
+        .ackno = datagram->header.ackno,
+        .is_ack = rcp_has_flag(&datagram->header, RCP_FLAG_ACK),
+        .window_size = datagram->header.window,
+    };
 
-    /* Get the next hop NRF address from the routing table */
-    uint8_t dst_rcp = peer->remote_addr;
-    uint32_t next_hop_nrf = rtable_map[dst_rcp][0];
-
-    /* Convert the receiver_segment_t to a rcp_datagram_t */
-    rcp_datagram_t datagram = receiver_segment_to_rcp(peer, segment);
-
-    /* Serialize the datagram */
-    uint8_t buffer[RCP_TOTAL_SIZE];
-    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
-
-    /* Send the reply to the next hop NRF address */
-    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
+    return seg;
 }
+
+/********* TCP PEER *********/
 
 /**
  * Initialize a new TCP peer
@@ -102,29 +73,13 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *sender_nrf, nrf_t *receiver_nrf, u
                                        uint8_t remote_addr) {
     tcp_peer_t peer;
 
-    peer.sender = sender_init(sender_nrf, transmit_segment, &peer);
-    peer.receiver = receiver_init(receiver_nrf, transmit_reply, &peer);
-
-    peer.local_addr = local_addr;
-    peer.remote_addr = remote_addr;
+    peer.sender = sender_init(sender_nrf, local_addr, remote_addr);
+    peer.receiver = receiver_init(receiver_nrf, local_addr, remote_addr);
 
     peer.time_of_last_receipt = timer_get_usec(); /* Initialize to current time */
     peer.linger_after_streams_finish = true;
 
     return peer;
-}
-
-/**
- * Main polling function that should be called regularly in your main loop
- *
- * @param peer The TCP peer to process
- */
-static inline void tcp_tick(tcp_peer_t *peer) {
-    assert(peer);
-
-    tcp_check_incoming(peer);
-    tcp_send_pending(peer);
-    tcp_check_timeouts(peer);
 }
 
 /**
@@ -205,6 +160,19 @@ static inline void tcp_check_timeouts(tcp_peer_t *peer) {
 
     /* Check if any segments need to be retransmitted */
     sender_check_retransmits(&peer->sender);
+}
+
+/**
+ * Main polling function that should be called regularly in your main loop
+ *
+ * @param peer The TCP peer to process
+ */
+static inline void tcp_tick(tcp_peer_t *peer) {
+    assert(peer);
+
+    tcp_check_incoming(peer);
+    tcp_send_pending(peer);
+    tcp_check_timeouts(peer);
 }
 
 /**

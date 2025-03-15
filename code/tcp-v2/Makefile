@@ -1,7 +1,8 @@
+# PROGS += tests/test-rcp.c
 # PROGS += tests/test-bytestream.c
 # PROGS += tests/test-sender.c
-# PROGS += tests/test-receiver.c
-PROGS += tests/test-rcp.c
+PROGS += tests/test-receiver.c
+
 
 LIBS += $(CS140E_PITCP)/lib/libgcc.a
 
@@ -14,7 +15,7 @@ COMMON_SRC += router.h
 COMMON_SRC += sender.h
 COMMON_SRC += tcp.h
 COMMON_SRC += types.h
-COMMON_SRC += util.h
+
 COMMON_SRC += $(CS140E_PITCP)/code/nrf/nrf-driver.c
 COMMON_SRC += $(CS140E_PITCP)/code/nrf/nrf-hw-support.c
 COMMON_SRC += $(CS140E_PITCP)/code/nrf/nrf-public.c

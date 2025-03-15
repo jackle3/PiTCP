@@ -1,8 +1,24 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+// Include types first so nrf_t is defined
+#include "nrf.h"
+#include "types.h"
+
+// Now define our mock function (after nrf_t is defined)
+static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, unsigned nbytes);
+
+// Here's the key part: UNDEFINE the original function first, then redefine it
+#undef nrf_send_noack
+#define nrf_send_noack mock_nrf_send_noack
+
+// Now include the rest of the headers
+#include "bytestream.h"
+#include "rcp-datagram.h"
 #include "receiver.h"
 #include "sender.h"
+#include "tcp.h"
 
 // Track the last segments transmitted
 static sender_segment_t last_sender_segment;
@@ -15,38 +31,57 @@ typedef struct mock_nrf {
     int dummy;
 } mock_nrf_t;
 
-mock_nrf_t mock_nrf_init() {
-    mock_nrf_t nrf = {0};
+mock_nrf_t *mock_nrf_init(void) {
+    mock_nrf_t *nrf = kmalloc(sizeof(mock_nrf_t));
+    memset(nrf, 0, sizeof(mock_nrf_t));
     return nrf;
 }
 
-// Mock transmit callback for sender
-static void sender_mock_transmit(tcp_peer_t *peer, sender_segment_t *segment) {
-    printk(
-        "<transmit> Sender transmit: seqno=%u, len=%u, expected_ackno=%u, is_syn=%d, is_fin=%d: "
-        "%s\n",
-        segment->seqno, segment->len, segment->seqno + segment->len, segment->is_syn,
-        segment->is_fin, segment->payload);
+// Implementation of our mock function to intercept sent data
+static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, unsigned nbytes) {
+    printk("Mock nrf_send_noack: addr=%u, nbytes=%u\n", txaddr, nbytes);
 
-    // Save a copy of the segment for receiver processing
-    memcpy(&last_sender_segment, segment, sizeof(sender_segment_t));
-    sender_segment_count++;
-}
+    // If this is a datagram, try to capture info about what was sent
+    if (nbytes >= RCP_HEADER_LENGTH) {
+        rcp_datagram_t datagram = rcp_datagram_init();
+        if (rcp_datagram_parse(&datagram, msg, nbytes) > 0) {
+            // Check if it's an ACK message
+            if (rcp_has_flag(&datagram.header, RCP_FLAG_ACK)) {
+                // Convert to receiver segment (ACK)
+                receiver_segment_t seg = rcp_to_receiver_segment(&datagram);
+                memcpy(&last_ack, &seg, sizeof(receiver_segment_t));
+                ack_count++;
+                printk("<transmit> Receiver ACK: ackno=%u, window_size=%u\n", seg.ackno,
+                       seg.window_size);
+            } else {
+                // It's a data segment from sender
+                sender_segment_t seg = rcp_to_sender_segment(&datagram);
+                memcpy(&last_sender_segment, &seg, sizeof(sender_segment_t));
+                sender_segment_count++;
+                printk(
+                    "<transmit> Sender transmit: seqno=%u, len=%u, expected_ackno=%u, is_syn=%d, "
+                    "is_fin=%d\n",
+                    seg.seqno, seg.len, seg.seqno + seg.len, seg.is_syn, seg.is_fin);
 
-// Mock transmit callback for receiver
-static void receiver_mock_transmit(tcp_peer_t *peer, receiver_segment_t *segment) {
-    printk("<transmit> Receiver ACK: ackno=%u, window_size=%u\n", segment->ackno,
-           segment->window_size);
+                if (seg.len > 0) {
+                    // Copy payload into printed message - handle non-null terminated data
+                    char payload_str[RCP_MAX_PAYLOAD + 1];
+                    memcpy(payload_str, seg.payload, seg.len);
+                    payload_str[seg.len] = '\0';
+                    printk("Payload: %s\n", payload_str);
+                }
+            }
+        }
+    }
 
-    // Save a copy of the segment for later inspection
-    memcpy(&last_ack, segment, sizeof(receiver_segment_t));
-    ack_count++;
+    return nbytes;
 }
 
 // Helper function to send a segment and process it on the receiver side
 static void send_and_process(sender_t *sender, receiver_t *receiver) {
     // Reset segment count to track if a new segment is sent
     sender_segment_count = 0;
+    ack_count = 0;
 
     printk("Sender window: next_seqno=%u, acked_seqno=%u, window_size=%u\n", sender->next_seqno,
            sender->acked_seqno, sender->window_size);
@@ -65,8 +100,11 @@ static void send_and_process(sender_t *sender, receiver_t *receiver) {
     // Process the segment on the receiver side
     recv_process_segment(receiver, &last_sender_segment);
 
-    // Process any ACK from receiver back to sender
-    sender_process_reply(sender, &last_ack);
+    // Check if an ACK was generated
+    if (ack_count > 0) {
+        // Process any ACK from receiver back to sender
+        sender_process_reply(sender, &last_ack);
+    }
 }
 
 // Test receiver functionality
@@ -74,12 +112,17 @@ static void test_receiver(void) {
     printk("--------------------------------\n");
     printk("Starting receiver test...\n");
 
-    // Initialize mock NRF
-    mock_nrf_t mock_nrf = mock_nrf_init();
+    // Define local and remote addresses
+    const uint8_t LOCAL_ADDR = 1;
+    const uint8_t REMOTE_ADDR = 2;
 
-    // Initialize sender and receiver
-    sender_t sender = sender_init((nrf_t *)&mock_nrf, sender_mock_transmit, NULL);
-    receiver_t receiver = receiver_init((nrf_t *)&mock_nrf, receiver_mock_transmit, NULL);
+    // Initialize mock NRF
+    mock_nrf_t *mock_nrf = mock_nrf_init();
+    assert(mock_nrf != NULL);
+
+    // Initialize sender and receiver with the updated function signature
+    sender_t sender = sender_init((nrf_t *)mock_nrf, LOCAL_ADDR, REMOTE_ADDR);
+    receiver_t receiver = receiver_init((nrf_t *)mock_nrf, LOCAL_ADDR, REMOTE_ADDR);
 
     printk("Sender and receiver initialized\n");
 
@@ -210,17 +253,23 @@ static void test_receiver(void) {
     printk("Sending segment 1\n");
     sender_send_segment(&sender, seg1);
     recv_process_segment(&receiver, &seg1);
-    sender_process_reply(&sender, &last_ack);
+    if (ack_count > 0) {
+        sender_process_reply(&sender, &last_ack);
+    }
 
     printk("\nSending segment 3 (out of order)\n");
     sender_send_segment(&sender, seg3);
     recv_process_segment(&receiver, &seg3);
-    sender_process_reply(&sender, &last_ack);
+    if (ack_count > 0) {
+        sender_process_reply(&sender, &last_ack);
+    }
 
     printk("\nSending segment 2 (fills the gap)\n");
     sender_send_segment(&sender, seg2);
     recv_process_segment(&receiver, &seg2);
-    sender_process_reply(&sender, &last_ack);
+    if (ack_count > 0) {
+        sender_process_reply(&sender, &last_ack);
+    }
 
     // Check that all segments were reassembled correctly
     uint8_t reassembled[100];
@@ -257,14 +306,32 @@ static void test_receiver(void) {
 
     // Keep sending until FIN is sent
     bool fin_observed = false;
-    while (!fin_observed && !bs_reader_finished(&sender.reader)) {
-        // Print info about sender and receiver windows
-        send_and_process(&sender, &receiver);
+    while (!fin_observed) {
+        // Push more data and try to send FIN
+        sender_push(&sender);
 
-        // Check if the last sent segment had the FIN flag
-        if (last_sender_segment.is_fin) {
-            fin_observed = true;
-            printk("FIN flag observed\n");
+        // Check if a segment was actually transmitted
+        if (sender_segment_count > 0) {
+            // Process the segment on the receiver side
+            recv_process_segment(&receiver, &last_sender_segment);
+
+            // Check if the last sent segment had the FIN flag
+            if (last_sender_segment.is_fin) {
+                fin_observed = true;
+                printk("FIN flag observed\n");
+            }
+
+            // Process any ACK from receiver back to sender
+            if (ack_count > 0) {
+                sender_process_reply(&sender, &last_ack);
+            }
+        }
+
+        // Exit if FIN was observed or no more data available including FIN sent
+        if (fin_observed ||
+            (bs_reader_finished(&sender.reader) && !bs_bytes_available(&sender.reader) &&
+             sender.next_seqno > sender.acked_seqno)) {
+            break;
         }
     }
 
