@@ -221,6 +221,96 @@ static inline bool tcp_send_syn_ack(tcp_peer_t *peer, uint32_t recv_seqno) {
 }
 
 /**
+ * Send a FIN segment to initiate connection termination
+ *
+ * @param peer The TCP peer initiating termination
+ * @return True if successful, false otherwise
+ */
+static inline bool tcp_send_fin(tcp_peer_t *peer) {
+    assert(peer);
+
+    /* Create a FIN segment */
+    sender_segment_t fin_seg = {
+        .seqno = peer->sender.next_seqno,
+        .is_syn = false,
+        .is_fin = true,
+        .len = 0 /* FIN has no payload */
+    };
+
+    /* Queue the FIN segment for sending */
+    sender_send_segment(&peer->sender, fin_seg);
+    printk("  [SEND %x] FIN with seqno %u\n", peer->sender.local_addr, fin_seg.seqno);
+
+    /* Update state based on current state */
+    if (peer->state == TCP_ESTABLISHED) {
+        peer->state = TCP_FIN_WAIT_1;
+    } else if (peer->state == TCP_CLOSE_WAIT) {
+        peer->state = TCP_LAST_ACK;
+    }
+
+    return true;
+}
+
+/**
+ * Process a received FIN segment
+ *
+ * @param peer The TCP peer processing the FIN
+ * @param segment The received segment with FIN flag
+ */
+static inline void tcp_process_fin(tcp_peer_t *peer, sender_segment_t *segment) {
+    assert(peer);
+    assert(segment);
+
+    printk("  [RECV %x] FIN from %u\n", peer->receiver.local_addr, segment->seqno);
+
+    /* Mark receiver as having received FIN */
+    peer->receiver.fin_received = true;
+
+    /* Calculate the next expected sequence number (after FIN) */
+    uint32_t next_seqno = segment->seqno + segment->len + 1; /* +1 for FIN */
+
+    /* Send an ACK for the FIN */
+    receiver_segment_t ack = {
+        .ackno = next_seqno, .is_ack = true, .window_size = peer->receiver.window_size};
+
+    sender_send_ack(&peer->sender, &ack);
+    printk("  [SEND %x] ACK for FIN with ackno %u\n", peer->sender.local_addr, ack.ackno);
+
+    /* Update state based on current state */
+    if (peer->state == TCP_ESTABLISHED) {
+        peer->state = TCP_CLOSE_WAIT;
+    } else if (peer->state == TCP_FIN_WAIT_1) {
+        peer->state = TCP_CLOSING;
+    } else if (peer->state == TCP_FIN_WAIT_2) {
+        peer->state = TCP_TIME_WAIT;
+    }
+
+    /* Close the receiving bytestream */
+    bs_end_input(&peer->receiver.writer);
+}
+
+/**
+ * Process an ACK for a sent FIN
+ *
+ * @param peer The TCP peer processing the ACK
+ * @param ackno The acknowledgment number in the ACK
+ */
+static inline void tcp_process_fin_ack(tcp_peer_t *peer, uint32_t ackno) {
+    assert(peer);
+
+    printk("  [RECV %x] ACK for FIN with ackno %u\n", peer->receiver.local_addr, ackno);
+
+    /* Update state based on current state */
+    if (peer->state == TCP_FIN_WAIT_1) {
+        peer->state = TCP_FIN_WAIT_2;
+    } else if (peer->state == TCP_CLOSING) {
+        peer->state = TCP_TIME_WAIT;
+    } else if (peer->state == TCP_LAST_ACK) {
+        peer->state = TCP_CLOSED;
+    }
+}
+
+/**
  * Process incoming segments from the remote peer and handle handshake steps
  *
  * @param peer The TCP peer to process
@@ -337,8 +427,12 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
             break;
 
         case TCP_ESTABLISHED:
-            /* Connection is established, handle normal data flow */
-            if (is_ack) {
+            /* Connection is established, handle normal data flow and termination */
+            if (is_fin) {
+                /* Process FIN segment */
+                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
+                tcp_process_fin(peer, &fin_segment);
+            } else if (is_ack) {
                 /* Process ACK */
                 receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
                 printk("  [RECV %x] ACK from %u with window size %u\n", peer->receiver.local_addr,
@@ -347,7 +441,7 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
             }
 
             /* Process data segment if present */
-            if (datagram.header.payload_len > 0 || is_fin) {
+            if (datagram.header.payload_len > 0) {
                 sender_segment_t data_segment = rcp_to_sender_segment(&datagram);
                 printk("  [RECV %x] segment from %u to %u with length %u\n",
                        peer->receiver.local_addr, data_segment.seqno,
@@ -356,8 +450,99 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
             }
             break;
 
-        /* Other TCP states would be handled here */
-        default:
+        case TCP_FIN_WAIT_1:
+            /* We've sent FIN, waiting for ACK and maybe FIN */
+            if (is_fin) {
+                /* Process FIN segment (could be simultaneous close) */
+                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
+                tcp_process_fin(peer, &fin_segment);
+            }
+
+            if (is_ack) {
+                /* Process ACK - could be ACK for our FIN */
+                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
+
+                /* Check if this ACK is for our FIN */
+                if (ack_segment.ackno == peer->sender.next_seqno) {
+                    printk("  [RECV %x] FIN_WAIT_1 ACK for FIN with ackno %u\n",
+                           peer->receiver.local_addr, ack_segment.ackno);
+                    tcp_process_fin_ack(peer, ack_segment.ackno);
+                } else {
+                    printk("  [RECV %x] FIN_WAIT_1 ACK from %u with window size %u\n",
+                           peer->receiver.local_addr, ack_segment.ackno, ack_segment.window_size);
+                    /* Regular ACK, not for our FIN */
+                    sender_process_reply(&peer->sender, &ack_segment);
+                }
+            }
+            break;
+
+        case TCP_FIN_WAIT_2:
+            /* Our FIN has been ACKed, waiting for remote FIN */
+            if (is_fin) {
+                /* Process FIN segment */
+                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
+                tcp_process_fin(peer, &fin_segment);
+            }
+            break;
+
+        case TCP_CLOSE_WAIT:
+            /* Remote has sent FIN, we've ACKed it, app needs to close */
+            if (is_ack) {
+                /* Process ACK */
+                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
+                sender_process_reply(&peer->sender, &ack_segment);
+            }
+            break;
+
+        case TCP_CLOSING:
+            /* Both sides initiated close */
+            if (is_ack) {
+                /* Process ACK - could be ACK for our FIN */
+                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
+
+                /* Check if this ACK is for our FIN */
+                if (ack_segment.ackno == peer->sender.next_seqno) {
+                    tcp_process_fin_ack(peer, ack_segment.ackno);
+                } else {
+                    /* Regular ACK */
+                    sender_process_reply(&peer->sender, &ack_segment);
+                }
+            }
+            break;
+
+        case TCP_LAST_ACK:
+            /* We sent FIN after receiving remote FIN, waiting for ACK */
+            if (is_ack) {
+                /* Process ACK - could be ACK for our FIN */
+                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
+
+                /* Check if this ACK is for our FIN */
+                if (ack_segment.ackno == peer->sender.next_seqno) {
+                    tcp_process_fin_ack(peer, ack_segment.ackno);
+                } else {
+                    /* Regular ACK */
+                    sender_process_reply(&peer->sender, &ack_segment);
+                }
+            }
+            break;
+
+        case TCP_TIME_WAIT:
+            /* We're waiting for delayed segments to expire */
+            /* Just ACK any duplicate FINs that might arrive */
+            if (is_fin) {
+                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
+
+                /* Send an ACK for the FIN */
+                receiver_segment_t ack = {.ackno = fin_segment.seqno + fin_segment.len + 1,
+                                          .is_ack = true,
+                                          .window_size = peer->receiver.window_size};
+
+                sender_send_ack(&peer->sender, &ack);
+            }
+            break;
+
+        case TCP_CLOSED:
+            /* Connection is closed, ignore packets */
             break;
     }
 }
@@ -386,14 +571,41 @@ static inline bool tcp_connect(tcp_peer_t *peer) {
 static inline void tcp_send_pending(tcp_peer_t *peer) {
     assert(peer);
 
-    /* Only send data if connection is established */
+    /* Check if a FIN needs to be sent */
+    bool should_send_fin = false;
+
+    /* Send FIN if we're in FIN_WAIT_1 or LAST_ACK and we need to initiate closure */
+    if ((peer->state == TCP_FIN_WAIT_1 || peer->state == TCP_LAST_ACK) &&
+        bs_reader_finished(&peer->sender.reader)) {
+        /* Check if we've already sent a FIN */
+        bool fin_already_sent = false;
+        unacked_segment_t *seg = rtq_start(&peer->sender.pending_segs);
+
+        while (seg != NULL) {
+            if (seg->seg.is_fin) {
+                fin_already_sent = true;
+                break;
+            }
+            seg = seg->next;
+        }
+
+        /* If no FIN has been sent yet, send one */
+        if (!fin_already_sent) {
+            should_send_fin = true;
+        }
+    }
+
+    /* Only send regular data if connection is established */
     if (peer->state == TCP_ESTABLISHED) {
-        /* Try to push any pending data from the bytestream to the network
-           If we've reached the end of the input stream but haven't sent FIN yet,
-           also try to push a FIN segment */
-        if (bs_bytes_available(&peer->sender.reader) || bs_reader_finished(&peer->sender.reader)) {
+        /* Try to push any pending data from the bytestream to the network */
+        if (bs_bytes_available(&peer->sender.reader)) {
             sender_push(&peer->sender);
         }
+    }
+
+    /* Send FIN if needed */
+    if (should_send_fin) {
+        tcp_send_fin(peer);
     }
 }
 
@@ -504,14 +716,22 @@ static inline void tcp_close(tcp_peer_t *peer) {
         /* Update state */
         if (peer->state == TCP_ESTABLISHED) {
             peer->state = TCP_FIN_WAIT_1;
+
+            /* Immediately send a FIN if no data is pending */
+            if (!bs_bytes_available(&peer->sender.reader)) {
+                tcp_send_fin(peer);
+            }
+            /* Otherwise, FIN will be sent after data in tcp_send_pending */
         } else if (peer->state == TCP_CLOSE_WAIT) {
             peer->state = TCP_LAST_ACK;
+
+            /* Always send FIN immediately in LAST_ACK state */
+            tcp_send_fin(peer);
         }
     } else if (peer->state == TCP_SYN_SENT || peer->state == TCP_SYN_RECEIVED) {
         /* Abort connection attempt */
         peer->state = TCP_CLOSED;
     }
-    /* The next call to tcp_tick will attempt to send a FIN */
 }
 
 /**
@@ -530,8 +750,11 @@ static inline bool tcp_is_active(tcp_peer_t *peer) {
         return false;
     }
 
-    if (peer->state == TCP_TIME_WAIT &&
-        now >= peer->time_of_last_receipt + 2 * peer->sender.initial_RTO_us) {
+    /* Check if the TIME_WAIT state has expired */
+    uint32_t expire_time = peer->time_of_last_receipt + 2 * peer->sender.initial_RTO_us;
+    printk("  [TCP] TIME_WAIT: current time %u, last receipt %u, RTO %u, expire_time %u\n", now,
+           peer->time_of_last_receipt, peer->sender.initial_RTO_us, expire_time);
+    if (peer->state == TCP_TIME_WAIT && now >= expire_time) {
         return false;
     }
 

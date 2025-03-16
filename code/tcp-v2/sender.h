@@ -368,7 +368,7 @@ bool sender_send_ack(sender_t *sender, receiver_segment_t *ack) {
     assert(sender);
     assert(ack);
 
-    printk("  [SEND] Sending pure ACK %u\n", ack->ackno);
+    printk("  [SEND %x] Sending pure ACK %u\n", sender->local_addr, ack->ackno);
 
     /* We always use the sender's NRF to send messages out */
     nrf_t *sender_nrf = sender->nrf;
