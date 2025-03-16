@@ -3,6 +3,9 @@
 #include "bytestream.h"
 #include "types.h"
 
+// Receiver's window size
+#define MAX_WINDOW_SIZE 64
+
 /********* TYPES *********/
 
 /* Receiver state structure */

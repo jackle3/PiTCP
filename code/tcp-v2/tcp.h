@@ -105,6 +105,29 @@ typedef struct tcp_peer {
 /********* HELPER FUNCTIONS *********/
 
 /**
+ * Find an unacknowledged segment by sequence number
+ *
+ * @param peer The TCP peer to search in
+ * @param seqno The sequence number to find
+ * @return Pointer to the segment if found, NULL otherwise
+ */
+static inline unacked_tcp_segment_t *find_unacked_segment_by_seqno(tcp_peer_t *peer,
+                                                                   uint16_t seqno) {
+    assert(peer);
+
+    unacked_tcp_segment_t *current = tcp_rtx_start(&peer->rtx_queue);
+
+    while (current != NULL) {
+        if (current->segment.has_sender_segment && current->segment.sender_segment.seqno == seqno) {
+            return current;
+        }
+        current = current->next;
+    }
+
+    return NULL;
+}
+
+/**
  * Convert an RCP datagram to a TCP segment
  *
  * @param datagram Pointer to the RCP datagram to convert
@@ -273,6 +296,14 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
     assert(peer);
     assert(segment);
 
+    uint32_t now = timer_get_usec();
+
+    // Check if we should wait due to congestion control pacing
+    if (segment->has_sender_segment && sender_should_wait(&peer->sender, now)) {
+        // Too soon to send, will try later
+        return;
+    }
+
     // Convert TCP segment to RCP datagram
     rcp_datagram_t datagram =
         tcp_segment_to_rcp(segment, peer->sender.local_addr, peer->sender.remote_addr);
@@ -326,32 +357,33 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
             // Add to the end of the queue
             memcpy(&rtx_segment->segment, segment, sizeof(tcp_segment_t));
 
-            printk("  [TCP %x] Adding segment to retransmission queue: ", peer->sender.local_addr);
+            VERBOSE_PRINT("  [TCP %x] Adding segment to retransmission queue: ",
+                          peer->sender.local_addr);
             if (rtx_segment->segment.has_sender_segment) {
-                printk("seqno=%u ", rtx_segment->segment.sender_segment.seqno);
+                VERBOSE_PRINT("seqno=%u ", rtx_segment->segment.sender_segment.seqno);
                 if (rtx_segment->segment.sender_segment.is_syn)
-                    printk("syn=1 ");
+                    VERBOSE_PRINT("syn=1 ");
                 if (rtx_segment->segment.sender_segment.is_fin)
-                    printk("fin=1 ");
-                printk("len=%u ", rtx_segment->segment.sender_segment.len);
+                    VERBOSE_PRINT("fin=1 ");
+                VERBOSE_PRINT("len=%u ", rtx_segment->segment.sender_segment.len);
             }
             if (rtx_segment->segment.has_receiver_segment) {
-                printk("ackno=%u ", rtx_segment->segment.receiver_segment.ackno);
+                VERBOSE_PRINT("ackno=%u ", rtx_segment->segment.receiver_segment.ackno);
                 if (rtx_segment->segment.receiver_segment.is_ack)
-                    printk("ack=1 ");
-                printk("window=%u ", rtx_segment->segment.receiver_segment.window_size);
+                    VERBOSE_PRINT("ack=1 ");
+                VERBOSE_PRINT("window=%u ", rtx_segment->segment.receiver_segment.window_size);
             }
-            printk("\n");
+            VERBOSE_PRINT("\n");
 
             tcp_rtx_append(&peer->rtx_queue, rtx_segment);
             peer->segs_in_flight++;
 
             // Update sender's sequence number
-            sender_segment_sent(&peer->sender, &segment->sender_segment);
+            sender_segment_sent(&peer->sender, &segment->sender_segment, now);
         }
     } else if (segment->has_sender_segment) {
         // Update sender's sequence number even if we don't need acknowledgment
-        sender_segment_sent(&peer->sender, &segment->sender_segment);
+        sender_segment_sent(&peer->sender, &segment->sender_segment, now);
     }
 }
 
@@ -386,12 +418,33 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
     // Process receiver part with sender
     if (segment->has_receiver_segment && segment->receiver_segment.is_ack) {
         DEBUG_PRINT(" [TCP] Processing ACK\n");
-        // Update sender's acknowledged sequence number
+        // Check for fast retransmit (3 duplicate ACKs)
+        bool need_fast_retransmit = false;
+        uint16_t fast_retx_seqno = 0;
+
+        // Update sender's state (ackno and window) with the ACK
         sender_process_ack(&peer->sender, &segment->receiver_segment);
 
-        bool new_data_acked = false;
+        // Fast retransmit triggered if dup_ack_count reached 3
+        if (peer->sender.dup_ack_count == 0 &&
+            segment->receiver_segment.ackno == peer->sender.acked_seqno) {
+            // The counter was just reset after hitting 3, so we need to retransmit
+            need_fast_retransmit = true;
+            fast_retx_seqno = peer->sender.acked_seqno;
+        }
+
+        // If fast retransmit is needed, find and retransmit the segment
+        if (need_fast_retransmit) {
+            unacked_tcp_segment_t *rtx_seg = find_unacked_segment_by_seqno(peer, fast_retx_seqno);
+            if (rtx_seg) {
+                VERBOSE_PRINT("  [TCP %x] Fast retransmitting segment: seqno=%u\n",
+                              peer->sender.local_addr, fast_retx_seqno);
+                tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
+            }
+        }
 
         // Remove acknowledged segments from retransmission queue
+        bool new_data_acked = false;
         while (!tcp_rtx_empty(&peer->rtx_queue)) {
             unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
 
@@ -613,7 +666,8 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
 
             if (recv_response) {
                 // Check if we can piggyback data on the ACK
-                sender_segment_t *new_data = sender_generate_segment(&peer->sender);
+                sender_segment_t *new_data =
+                    sender_generate_segment(&peer->sender, timer_get_usec());
 
                 if (new_data) {
                     // Send ACK with piggyback data
@@ -680,6 +734,9 @@ static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time
         unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
         tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
 
+        // Update sender's congestion window
+        sender_handle_retransmit(&peer->sender, rtx_seg->segment.sender_segment.seqno);
+
         printk("  [TCP %x] Retransmitting segment (retry %u): seqno=%u, len=%u\n",
                peer->sender.local_addr, peer->consec_retransmits + 1,
                rtx_seg->segment.sender_segment.seqno, rtx_seg->segment.sender_segment.len);
@@ -711,7 +768,7 @@ static inline void tcp_send_new_data(tcp_peer_t *peer) {
     }
 
     // Try to generate a new segment
-    sender_segment_t *new_segment = sender_generate_segment(&peer->sender);
+    sender_segment_t *new_segment = sender_generate_segment(&peer->sender, timer_get_usec());
 
     DEBUG_PRINT(" [TCP] Sending new data\n");
     DEBUG_PRINT("      - new_segment->is_fin: %u\n", new_segment->is_fin);
@@ -751,6 +808,16 @@ static inline void tcp_tick(tcp_peer_t *peer) {
     assert(peer);
 
     uint32_t current_time = timer_get_usec();
+
+    // Print debug information occasionally
+    static uint32_t last_debug_time = 0;
+    if (current_time - last_debug_time > S_TO_US(1)) {  // Every second
+        uint16_t cwnd, bytes_in_flight;
+        sender_get_cwnd_info(&peer->sender, &cwnd, &bytes_in_flight);
+
+        printk("  [TCP CWND] %u bytes (used %u)\n", cwnd, bytes_in_flight);
+        last_debug_time = current_time;
+    }
 
     // Check for incoming packets
     uint8_t buffer[RCP_TOTAL_SIZE];
