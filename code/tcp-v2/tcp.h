@@ -73,8 +73,6 @@ typedef void (*tcp_send_callback_t)(nrf_t *nrf, uint8_t src, uint8_t dst, const 
 typedef struct unacked_tcp_segment {
     struct unacked_tcp_segment *next; /* Next in queue */
     tcp_segment_t segment;            /* Complete TCP segment (sender+receiver parts) */
-    uint32_t time_sent;               /* Time when this segment was sent */
-    uint32_t retransmit_count;        /* Number of times this segment has been retransmitted */
 } unacked_tcp_segment_t;
 
 /* Queue of unacknowledged segments */
@@ -93,10 +91,14 @@ typedef struct tcp_peer {
     nrf_t *nrf;                        /* NRF interface for sending/receiving */
     tcp_send_callback_t send_callback; /* Callback for sending segments */
 
-    tcp_state_t state;         /* Current TCP connection state */
-    tcp_rtx_queue_t rtx_queue; /* Queue of segments that need acknowledgment */
-    uint32_t initial_RTO_us;   /* Initial retransmission timeout */
-    uint32_t timeout_time_us;  /* Timeout for current state (e.g., TIME_WAIT timer) */
+    tcp_state_t state; /* Current TCP connection state */
+
+    tcp_rtx_queue_t rtx_queue;  /* Queue of segments that need acknowledgment */
+    uint32_t initial_RTO_us;    /* Initial retransmission timeout */
+    uint32_t rto_us;            /* Next time to retransmit - when time >= rto_us, retransmit */
+    int16_t consec_retransmits; /* Number of consecutive retransmits */
+
+    uint32_t timeout_time_us; /* Timeout for current state (e.g., TIME_WAIT timer) */
 } tcp_peer_t;
 
 /********* HELPER FUNCTIONS *********/
@@ -235,6 +237,8 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t r
                        .send_callback = tcp_default_send_callback,
                        .state = is_server ? TCP_LISTEN : TCP_CLOSED,
                        .initial_RTO_us = RTO_INITIAL_US,
+                       .rto_us = 0,
+                       .consec_retransmits = -1, /* Initialize to -1 to indicate not started */
                        .timeout_time_us = 0};
 
     // Initialize retransmission queue
@@ -312,13 +316,15 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
         // Create a new entry for the retransmission queue
         unacked_tcp_segment_t *rtx_segment = kmalloc(sizeof(unacked_tcp_segment_t));
         if (rtx_segment) {
-            // Copy the segment and record time sent
-            memcpy(&rtx_segment->segment, segment, sizeof(tcp_segment_t));
-            rtx_segment->time_sent = timer_get_usec();
-            rtx_segment->retransmit_count = 0;
-            rtx_segment->next = NULL;
+            // Initialize the retransmission timer if not already started
+            if (peer->consec_retransmits == -1) {
+                peer->rto_us = timer_get_usec() + peer->initial_RTO_us;
+                peer->consec_retransmits = 0;
+            }
 
             // Add to the end of the queue
+            memcpy(&rtx_segment->segment, segment, sizeof(tcp_segment_t));
+            rtx_segment->next = NULL;
             tcp_rtx_append(&peer->rtx_queue, rtx_segment);
 
             // Update sender's sequence number
@@ -364,6 +370,8 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
         // Update sender's acknowledged sequence number
         sender_process_ack(&peer->sender, &segment->receiver_segment);
 
+        bool new_data_acked = false;
+
         // Remove acknowledged segments from retransmission queue
         while (!tcp_rtx_empty(&peer->rtx_queue)) {
             unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
@@ -389,10 +397,25 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
                     "queue\n",
                     rtx_seg->segment.sender_segment.seqno);
                 tcp_rtx_pop(&peer->rtx_queue);
+                new_data_acked = true;
             } else {
                 // Stop at first unacknowledged segment
                 break;
             }
+        }
+
+        // If new data was acknowledged, reset the retransmission timer
+        if (new_data_acked) {
+            VERBOSE_PRINT("  [TCP %x] New data acknowledged, resetting RTO\n",
+                          peer->sender.local_addr);
+            peer->rto_us = timer_get_usec() + peer->initial_RTO_us;
+            peer->consec_retransmits = 0;
+        }
+
+        // If all data has been acknowledged, stop the retransmission timer
+        if (tcp_rtx_empty(&peer->rtx_queue)) {
+            peer->rto_us = 0;
+            peer->consec_retransmits = -1;
         }
 
         // Process ACKs for connection management
@@ -604,23 +627,18 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
 static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time_us) {
     assert(peer);
 
-    if (tcp_rtx_empty(&peer->rtx_queue)) {
+    // We don't need to retransmit if we're not in the retransmission state
+    if (peer->consec_retransmits == -1 || tcp_rtx_empty(&peer->rtx_queue)) {
         return;
     }
 
-    // Check the oldest unacknowledged segment
-    unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
     // Print out the entire retransmission queue for debugging
     VERBOSE_PRINT("[TCP %x] Retransmission queue contents:\n", peer->sender.local_addr);
-
-    unacked_tcp_segment_t *current = rtx_seg;
+    unacked_tcp_segment_t *current = tcp_rtx_start(&peer->rtx_queue);
     int count = 0;
-
     while (current != NULL) {
-        VERBOSE_PRINT("    [%d] seqno: %u, len: %u, time_sent: %u, retries: %u\n", count,
-                      current->segment.sender_segment.seqno, current->segment.sender_segment.len,
-                      current->time_sent, current->retransmit_count);
-
+        VERBOSE_PRINT("    [%d] seqno: %u, len: %u\n", count, current->segment.sender_segment.seqno,
+                      current->segment.sender_segment.len);
         // Check if segment has SYN or FIN flags
         if (current->segment.sender_segment.is_syn) {
             VERBOSE_PRINT("        SYN flag set\n");
@@ -628,26 +646,32 @@ static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time
         if (current->segment.sender_segment.is_fin) {
             VERBOSE_PRINT("        FIN flag set\n");
         }
-
         count++;
         current = current->next;
     }
-
     VERBOSE_PRINT("  [TCP %x] Total segments in queue: %d\n", peer->sender.local_addr, count);
-    uint32_t rto = peer->initial_RTO_us * (1 << rtx_seg->retransmit_count);
 
-    // If it's time to retransmit
-    if (current_time_us >= rtx_seg->time_sent + rto) {
+    uint32_t now_us = timer_get_usec();
+    int32_t time_since_rto = now_us - peer->rto_us;
+
+    if (time_since_rto >= 0) {
+        // Send the oldest unacknowledged segment
+        unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
+        tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
+
         printk("  [TCP %x] Retransmitting segment (retry %u): seqno=%u, len=%u\n",
-               peer->sender.local_addr, rtx_seg->retransmit_count + 1,
+               peer->sender.local_addr, peer->consec_retransmits + 1,
                rtx_seg->segment.sender_segment.seqno, rtx_seg->segment.sender_segment.len);
 
-        // Update retransmission count and time
-        rtx_seg->retransmit_count++;
-        rtx_seg->time_sent = current_time_us;
-
-        // Send the segment again
-        tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
+        // Update retransmission timer - use exponential backoff if window is nonzero
+        if (peer->sender.window_size) {
+            // Exponential backoff: double RTO for each retransmission
+            peer->rto_us = now_us + (peer->initial_RTO_us * (1 << peer->consec_retransmits));
+            peer->consec_retransmits++;
+        } else {
+            // If window is zero, use fixed RTO for persistent probing
+            peer->rto_us = now_us + peer->initial_RTO_us;
+        }
     }
 }
 

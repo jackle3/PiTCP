@@ -185,44 +185,37 @@ static bool test_tcp_loopback(void) {
         printk("WARNING: Not all data was queued for sending\n");
     }
 
+    uint8_t receive_buffer[message_len];
+
     // Run ticks until all data is transferred or max iterations reached
     iterations = 0;
     size_t bytes_received = 0;
 
-    printk("Waiting for data transfer completion...\n");
+    printk("Starting data transfer...\n\n");
     while (bytes_received < message_len && iterations < MAX_ITERATIONS * 2) {
         size_t remaining_to_send = message_len - bytes_written;
         if (remaining_to_send > 0 && tcp_has_space(&client)) {
             size_t new_bytes_written =
                 tcp_write(&client, binary_data + bytes_written, remaining_to_send);
             bytes_written += new_bytes_written;
-            if (new_bytes_written > 0) {
-                printk("Client wrote %u more bytes (%u/%u total)\n", new_bytes_written,
-                       bytes_written, message_len);
-            }
         }
 
         // Run ticks
         run_ticks(&client, &server, 1);
         iterations++;
 
-        // Check if server has received data
+        // If the server received data, read it to free up space in the receiver's bytestream
         if (tcp_has_data(&server)) {
-            // Print the received data
-            uint8_t receive_buffer[128];
-            size_t bytes_read = tcp_read(&server, receive_buffer, sizeof(receive_buffer));
+            // Read the data into the receive buffer
+            size_t bytes_read = tcp_read(&server, receive_buffer + bytes_received,
+                                         sizeof(receive_buffer) - bytes_received);
             bytes_received += bytes_read;
-
-            printk("Received data (%u/%u bytes):\n", bytes_received, message_len);
-            for (size_t i = 0; i < bytes_read; i++) {
-                printk("%x ", receive_buffer[i]);
-            }
-            printk("\n");
         }
 
         // Log progress periodically
-        if (iterations % 30 == 0) {
+        if (iterations % 20 == 0) {
             printk("Transfer progress (iterations: %d):\n", iterations);
+            printk("  Client has written: %u/%u bytes\n", bytes_written, message_len);
             printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
             printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
                    tcp_state_name(server.state));
@@ -232,17 +225,32 @@ static bool test_tcp_loopback(void) {
             printk("  Next seqno: %u\n", client.sender.next_seqno);
             printk("  Acked seqno: %u\n", client.sender.acked_seqno);
             printk("  Window size: %u\n", client.sender.window_size);
-            printk("  Local addr: %u\n", client.sender.local_addr);
-            printk("  Remote addr: %u\n", client.sender.remote_addr);
 
             // Print the status about the server (receiver)
             printk("Server (receiver) status:\n");
             printk("  Next seqno: %u\n", server.receiver.next_seqno);
             printk("  Window size: %u\n", server.receiver.window_size);
-            printk("  Total size: %u\n", server.receiver.total_size);
-            printk("\n\n");
+            printk("\n");
         }
     }
+
+    printk("Finished sending in %d iterations\n", iterations);
+    printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
+    printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+           tcp_state_name(server.state));
+
+    // Print the status about the client (sender)
+    printk("Client (sender) status:\n");
+    printk("  Next seqno: %u\n", client.sender.next_seqno);
+    printk("  Acked seqno: %u\n", client.sender.acked_seqno);
+    printk("  Window size: %u\n", client.sender.window_size);
+
+    // Print the status about the server (receiver)
+    printk("Server (receiver) status:\n");
+    printk("  Next seqno: %u\n", server.receiver.next_seqno);
+    printk("  Window size: %u\n", server.receiver.window_size);
+    printk("  Total size: %u\n", server.receiver.total_size);
+    printk("\n");
 
     // Check if data transfer completed
     if (bytes_received < message_len) {
@@ -253,23 +261,19 @@ static bool test_tcp_loopback(void) {
 
     printk("Data transfer completed successfully after %d iterations\n", iterations);
 
-    // Read and verify the received data
-    uint8_t receive_buffer[512];  // Make sure this is large enough for the test message
-    size_t bytes_read = tcp_read(&server, receive_buffer, sizeof(receive_buffer));
-    receive_buffer[bytes_read] = '\0';  // Null-terminate for printing
+    receive_buffer[bytes_received] = '\0';  // Null-terminate for printing
 
-    printk("Server read %u bytes\n", bytes_read);
+    printk("Server read %u bytes\n", bytes_received);
 
     // Verify data integrity
     bool data_matches =
-        (bytes_read == message_len && memcmp(receive_buffer, binary_data, message_len) == 0);
+        (bytes_received == message_len && memcmp(receive_buffer, binary_data, message_len) == 0);
 
     if (data_matches) {
         printk("Data verification: SUCCESS!\n");
-        printk("Received message:\n%s\n", (char *)receive_buffer);
     } else {
         printk("ERROR: Data verification failed\n");
-        printk("Expected %u bytes, received %u bytes\n", message_len, bytes_read);
+        printk("Expected %u bytes, received %u bytes\n", message_len, bytes_received);
         return false;
     }
 
@@ -360,12 +364,28 @@ static bool test_tcp_loopback(void) {
     tcp_cleanup(&client);
     tcp_cleanup(&server);
 
+    printk("Final States");
+    printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+           tcp_state_name(server.state));
+
+    // Print the status about the client (sender)
+    printk("  Client (sender) status:\n");
+    printk("    Next seqno: %u\n", client.sender.next_seqno);
+    printk("    Acked seqno: %u\n", client.sender.acked_seqno);
+    printk("    Window size: %u\n", client.sender.window_size);
+
+    // Print the status about the server (receiver)
+    printk("  Server (receiver) status:\n");
+    printk("    Next seqno: %u\n", server.receiver.next_seqno);
+    printk("    Window size: %u\n", server.receiver.window_size);
+    printk("    Total size: %u\n", server.receiver.total_size);
+    printk("    Fin received: %d\n", server.receiver.fin_received);
+    printk("\n");
+
     // Print NRF statistics
     nrf_stat_print(client_nrf, "Client NRF stats");
     nrf_stat_print(server_nrf, "Server NRF stats");
 
-    printk("Final states - Client: %s, Server: %s\n", tcp_state_name(client.state),
-           tcp_state_name(server.state));
     printk("=== TCP Loopback Test Completed Successfully ===\n");
 
     return true;
