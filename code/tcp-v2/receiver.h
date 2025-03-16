@@ -3,6 +3,15 @@
 #include "bytestream.h"
 #include "types.h"
 
+// #define DEBUG
+
+// Debug printing macros
+#ifdef DEBUG
+#define DEBUG_PRINT(fmt, args...) printk(fmt, ##args)
+#else
+#define DEBUG_PRINT(fmt, args...) /* nothing */
+#endif
+
 /********* TYPES *********/
 
 /* Receiver state structure */
@@ -70,8 +79,8 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
 
     // If the segment is too far ahead, ignore it
     if (first_idx >= first_unacceptable_idx) {
-        printk("  [REASM] Ignoring segment %u to %u with length %u\n", first_idx, first_idx + len,
-               len);
+        DEBUG_PRINT("    [REASM] Ignoring segment %u to %u with length %u\n", first_idx,
+                    first_idx + len, len);
         return;
     }
 
@@ -79,8 +88,8 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
     const size_t first_inserted_idx = MAX(first_idx, first_unassembled_idx);
     const size_t last_inserted_idx = MIN(first_idx + len, first_unacceptable_idx);
 
-    printk("  [REASM] Inserting segment %u to %u with length %u\n", first_inserted_idx,
-           last_inserted_idx, last_inserted_idx - first_inserted_idx);
+    DEBUG_PRINT("    [REASM] Inserting segment %u to %u with length %u\n", first_inserted_idx,
+                last_inserted_idx, last_inserted_idx - first_inserted_idx);
 
     // Insert into reassembler if the substring is non-zero length
     if (first_inserted_idx < last_inserted_idx) {
@@ -101,7 +110,7 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
         index_to_push++;
     }
 
-    printk("  [REASM] Pushing %u bytes to the writer\n", index_to_push);
+    DEBUG_PRINT("    [REASM] Pushing %u bytes to the writer\n", index_to_push);
 
     // Push contiguous bytes to the writer if any exist
     if (index_to_push > 0) {
@@ -173,8 +182,8 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
                 ack_response.is_ack = true;
                 ack_response.window_size = bs_remaining_capacity(&receiver->writer);
 
-                printk("  [RECV] Sending ACK for SYN with ackno %u and window size %u\n",
-                       ack_response.ackno, ack_response.window_size);
+                DEBUG_PRINT("    [RECV] Sending ACK for SYN with ackno %u and window size %u\n",
+                            ack_response.ackno, ack_response.window_size);
 
                 return &ack_response;
             }
@@ -185,13 +194,14 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
             ack_response.is_ack = true;
             ack_response.window_size = bs_remaining_capacity(&receiver->writer);
 
-            printk("  [RECV] Duplicate SYN, sending ACK with ackno %u\n", ack_response.ackno);
+            DEBUG_PRINT("    [RECV] Duplicate SYN, sending ACK with ackno %u\n",
+                        ack_response.ackno);
             return &ack_response;
         }
     } else if (!receiver->syn_received) {
         // Ignore segments before SYN is received
-        printk("  [RECV] Missing SYN, ignoring segment %u to %u with length %u\n", segment->seqno,
-               segment->seqno + segment->len, segment->len);
+        DEBUG_PRINT("    [RECV] Missing SYN, ignoring segment %u to %u with length %u\n",
+                    segment->seqno, segment->seqno + segment->len, segment->len);
         return NULL;
     }
 
@@ -210,7 +220,8 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
             ack_response.is_ack = true;
             ack_response.window_size = bs_remaining_capacity(&receiver->writer);
 
-            printk("  [RECV] Duplicate segment, sending ACK with ackno %u\n", ack_response.ackno);
+            DEBUG_PRINT("    [RECV] Duplicate segment, sending ACK with ackno %u\n",
+                        ack_response.ackno);
             return &ack_response;
         }
 
@@ -264,8 +275,8 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
         ack_response.is_ack = true;
         ack_response.window_size = receiver->window_size;
 
-        printk("  [RECV] Sending ACK for segment with ackno %u and window size %u\n",
-               ack_response.ackno, ack_response.window_size);
+        DEBUG_PRINT("    [RECV] Sending ACK for segment with ackno %u and window size %u\n",
+                    ack_response.ackno, ack_response.window_size);
 
         return &ack_response;
     }

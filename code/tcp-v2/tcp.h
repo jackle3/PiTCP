@@ -8,6 +8,22 @@
 #include "sender.h"
 #include "types.h"
 
+
+
+// #define DEBUG
+#ifdef DEBUG
+#define DEBUG_PRINT(fmt, args...) printk(fmt, ##args)
+#else
+#define DEBUG_PRINT(fmt, args...) /* nothing */
+#endif
+
+// #define VERBOSE
+#ifdef VERBOSE
+#define VERBOSE_PRINT(fmt, args...) printk(fmt, ##args)
+#else
+#define VERBOSE_PRINT(fmt, args...) /* nothing */
+#endif
+
 /********* TYPES *********/
 
 #define S_TO_US(s) ((s) * 1000000)
@@ -86,12 +102,10 @@ typedef struct tcp_peer {
     nrf_t *nrf;                        /* NRF interface for sending/receiving */
     tcp_send_callback_t send_callback; /* Callback for sending segments */
 
-    tcp_state_t state;                /* Current TCP connection state */
-    tcp_rtx_queue_t rtx_queue;        /* Queue of segments that need acknowledgment */
-    uint32_t initial_RTO_us;          /* Initial retransmission timeout */
-    uint32_t time_of_last_receipt;    /* Time when last packet was received */
-    uint32_t timeout_time_us;         /* Timeout for current state (e.g., TIME_WAIT timer) */
-    bool linger_after_streams_finish; /* Whether to linger after streams finish */
+    tcp_state_t state;         /* Current TCP connection state */
+    tcp_rtx_queue_t rtx_queue; /* Queue of segments that need acknowledgment */
+    uint32_t initial_RTO_us;   /* Initial retransmission timeout */
+    uint32_t timeout_time_us;  /* Timeout for current state (e.g., TIME_WAIT timer) */
 } tcp_peer_t;
 
 /********* HELPER FUNCTIONS *********/
@@ -204,8 +218,8 @@ static inline void tcp_default_send_callback(nrf_t *nrf, uint8_t src, uint8_t ds
     // Get the next hop NRF address from the routing table
     uint32_t next_hop_nrf = rtable_map[src][dst];
 
-    printk(" [NRF] Sending data from %u (nrf: %x) to %u (nrf: %x)\n", src, nrf->rxaddr, dst,
-           next_hop_nrf);
+    DEBUG_PRINT(" [NRF] Sending data from %u (nrf: %x) to %u (nrf: %x)\n", src, nrf->rxaddr, dst,
+                next_hop_nrf);
 
     // Send the data via NRF
     nrf_send_noack(nrf, next_hop_nrf, data, len);
@@ -230,9 +244,7 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t r
                        .send_callback = tcp_default_send_callback,
                        .state = is_server ? TCP_LISTEN : TCP_CLOSED,
                        .initial_RTO_us = RTO_INITIAL_US,
-                       .time_of_last_receipt = timer_get_usec(),
-                       .timeout_time_us = 0,
-                       .linger_after_streams_finish = true};
+                       .timeout_time_us = 0};
 
     // Initialize retransmission queue
     tcp_rtx_init(&peer.rtx_queue);
@@ -274,30 +286,31 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
     int length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
 
     if (length <= 0) {
-        printk("  [TCP] Failed to serialize datagram\n");
+        VERBOSE_PRINT("  [TCP %x] Failed to serialize datagram\n", peer->sender.local_addr);
         return;
     }
 
     // Log sending information
-    printk("  [TCP] Sending segment: ");
+    uint32_t next_hop_nrf = rtable_map[peer->sender.local_addr][peer->sender.remote_addr];
+    VERBOSE_PRINT("  [TCP %x] Sending segment from NRF %x to NRF %x: ", peer->sender.local_addr,
+           peer->nrf->rxaddr, next_hop_nrf);
     if (segment->has_sender_segment) {
-        printk("seqno=%u ", segment->sender_segment.seqno);
+        VERBOSE_PRINT("seqno=%u ", segment->sender_segment.seqno);
         if (segment->sender_segment.is_syn)
-            printk("SYN ");
+            VERBOSE_PRINT("syn=1 ");
         if (segment->sender_segment.is_fin)
-            printk("FIN ");
-        printk("len=%u ", segment->sender_segment.len);
+            VERBOSE_PRINT("fin=1 ");
+        VERBOSE_PRINT("len=%u ", segment->sender_segment.len);
     }
     if (segment->has_receiver_segment) {
-        printk("ackno=%u ", segment->receiver_segment.ackno);
+        VERBOSE_PRINT("ackno=%u ", segment->receiver_segment.ackno);
         if (segment->receiver_segment.is_ack)
-            printk("ACK ");
-        printk("window=%u ", segment->receiver_segment.window_size);
+            VERBOSE_PRINT("ack=1 ");
+        VERBOSE_PRINT("window=%u ", segment->receiver_segment.window_size);
     }
-    printk("\n");
+    VERBOSE_PRINT("\n");
 
     // Send the segment using callback
-    printk("  [CALLBACK] sending segment\n");
     peer->send_callback(peer->nrf, peer->sender.local_addr, peer->sender.remote_addr, buffer,
                         length);
 
@@ -336,29 +349,27 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
     assert(peer);
     assert(segment);
 
-    printk(" [TCP] RCP %u: Processing received segment in state %s\n", peer->sender.local_addr,
-           tcp_state_to_string(peer->state));
-    printk("      - has_sender_segment: %u\n", segment->has_sender_segment);
-    printk("      - has_receiver_segment: %u\n", segment->has_receiver_segment);
+    DEBUG_PRINT(" [TCP] RCP %u: Processing received segment in state %s\n", peer->sender.local_addr,
+                tcp_state_to_string(peer->state));
+    DEBUG_PRINT("      - has_sender_segment: %u\n", segment->has_sender_segment);
+    DEBUG_PRINT("      - has_receiver_segment: %u\n", segment->has_receiver_segment);
     if (segment->has_sender_segment) {
-        printk("      - sender_segment.seqno: %u\n", segment->sender_segment.seqno);
-        printk("      - sender_segment.is_syn: %u\n", segment->sender_segment.is_syn);
-        printk("      - sender_segment.is_fin: %u\n", segment->sender_segment.is_fin);
-        printk("      - sender_segment.len: %u\n", segment->sender_segment.len);
+        DEBUG_PRINT("      - sender_segment.seqno: %u\n", segment->sender_segment.seqno);
+        DEBUG_PRINT("      - sender_segment.is_syn: %u\n", segment->sender_segment.is_syn);
+        DEBUG_PRINT("      - sender_segment.is_fin: %u\n", segment->sender_segment.is_fin);
+        DEBUG_PRINT("      - sender_segment.len: %u\n", segment->sender_segment.len);
     }
     if (segment->has_receiver_segment) {
-        printk("      - receiver_segment.ackno: %u\n", segment->receiver_segment.ackno);
-        printk("      - receiver_segment.is_ack: %u\n", segment->receiver_segment.is_ack);
-        printk("      - receiver_segment.window_size: %u\n", segment->receiver_segment.window_size);
+        DEBUG_PRINT("      - receiver_segment.ackno: %u\n", segment->receiver_segment.ackno);
+        DEBUG_PRINT("      - receiver_segment.is_ack: %u\n", segment->receiver_segment.is_ack);
+        DEBUG_PRINT("      - receiver_segment.window_size: %u\n",
+                    segment->receiver_segment.window_size);
     }
-    printk("\n\n");
-
-    // Update activity timestamp
-    peer->time_of_last_receipt = timer_get_usec();
+    DEBUG_PRINT("\n\n");
 
     // Process receiver part with sender
     if (segment->has_receiver_segment && segment->receiver_segment.is_ack) {
-        printk(" [TCP] Processing ACK\n");
+        DEBUG_PRINT(" [TCP] Processing ACK\n");
         // Update sender's acknowledged sequence number
         sender_process_ack(&peer->sender, &segment->receiver_segment);
 
@@ -382,7 +393,7 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
 
             // If this segment is fully acknowledged, remove it
             if (segment->receiver_segment.ackno >= seg_end_seqno) {
-                printk(
+                DEBUG_PRINT(
                     " [TCP] Segment seqno %u fully acknowledged, removing from retransmission "
                     "queue\n",
                     rtx_seg->segment.sender_segment.seqno);
@@ -399,33 +410,36 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
                 if (segment->has_sender_segment && segment->sender_segment.is_syn) {
                     // Received SYN-ACK in response to our SYN
                     peer->state = TCP_ESTABLISHED;
-                    printk("  [TCP] Connection established (client side)\n");
+                    VERBOSE_PRINT("  [TCP %x] Connection established (client side)\n",
+                           peer->sender.local_addr);
                 }
                 break;
 
             case TCP_SYN_RECEIVED:
                 // Received ACK for our SYN-ACK
                 peer->state = TCP_ESTABLISHED;
-                printk("  [TCP] Connection established (server side)\n");
+                VERBOSE_PRINT("  [TCP %x] Connection established (server side)\n",
+                       peer->sender.local_addr);
                 break;
 
             case TCP_FIN_WAIT_1:
                 // Received ACK for our FIN
                 peer->state = TCP_FIN_WAIT_2;
-                printk("  [TCP] FIN acknowledged, waiting for remote FIN\n");
+                VERBOSE_PRINT("  [TCP %x] FIN acknowledged, waiting for remote FIN\n",
+                       peer->sender.local_addr);
                 break;
 
             case TCP_CLOSING:
                 // Received ACK for our FIN after receiving remote FIN
                 peer->state = TCP_TIME_WAIT;
                 peer->timeout_time_us = timer_get_usec() + TIME_WAIT_DURATION_US;
-                printk("  [TCP] Entering TIME_WAIT state\n");
+                VERBOSE_PRINT("  [TCP %x] Entering TIME_WAIT state\n", peer->sender.local_addr);
                 break;
 
             case TCP_LAST_ACK:
                 // Received ACK for our FIN (after we received remote FIN and closed)
                 peer->state = TCP_CLOSED;
-                printk("  [TCP] Connection closed\n");
+                VERBOSE_PRINT("  [TCP %x] Connection closed\n", peer->sender.local_addr);
                 break;
 
             default:
@@ -443,7 +457,7 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
             switch (peer->state) {
                 case TCP_LISTEN:
                     // Server received SYN from client
-                    printk("  [TCP] Received SYN, sending SYN-ACK\n");
+                    VERBOSE_PRINT("  [TCP %x] Received SYN, sending SYN-ACK\n", peer->sender.local_addr);
 
                     // Process with receiver
                     recv_response =
@@ -472,7 +486,8 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
 
                 case TCP_SYN_SENT:
                     // Client received SYN from server (simultaneous open)
-                    printk("  [TCP] Simultaneous open, received SYN while in SYN_SENT\n");
+                    VERBOSE_PRINT("  [TCP %x] Simultaneous open, received SYN while in SYN_SENT\n",
+                           peer->sender.local_addr);
 
                     // Process with receiver
                     recv_response =
@@ -508,7 +523,7 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
         }
         // FIN processing for connection termination
         else if (segment->sender_segment.is_fin) {
-            printk("  [TCP] Received FIN\n");
+            VERBOSE_PRINT("  [TCP %x] Received FIN\n", peer->sender.local_addr);
 
             // Process with receiver
             recv_response = receiver_process_segment(&peer->receiver, &segment->sender_segment);
@@ -527,25 +542,29 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
                     case TCP_ESTABLISHED:
                         // Remote initiated close
                         peer->state = TCP_CLOSE_WAIT;
-                        printk("  [TCP] Remote closed, in CLOSE_WAIT state\n");
+                        VERBOSE_PRINT("  [TCP %x] Remote closed, in CLOSE_WAIT state\n",
+                               peer->sender.local_addr);
                         break;
 
                     case TCP_FIN_WAIT_1:
                         // We sent FIN, received FIN before our FIN was ACKed
                         peer->state = TCP_CLOSING;
-                        printk("  [TCP] Simultaneous close, in CLOSING state\n");
+                        VERBOSE_PRINT("  [TCP %x] Simultaneous close, in CLOSING state\n",
+                               peer->sender.local_addr);
                         break;
 
                     case TCP_FIN_WAIT_2:
                         // We sent FIN and it was ACKed, now remote sent FIN
                         peer->state = TCP_TIME_WAIT;
                         peer->timeout_time_us = timer_get_usec() + TIME_WAIT_DURATION_US;
-                        printk("  [TCP] Received FIN after our FIN was ACKed, in TIME_WAIT\n");
+                        VERBOSE_PRINT("  [TCP %x] Received FIN after our FIN was ACKed, in TIME_WAIT\n",
+                               peer->sender.local_addr);
                         break;
 
                     default:
                         // Invalid state for FIN
-                        printk("  [TCP] Received FIN in invalid state %d\n", peer->state);
+                        VERBOSE_PRINT("  [TCP %x] Received FIN in invalid state %d\n",
+                               peer->sender.local_addr, peer->state);
                         break;
                 }
             }
@@ -602,7 +621,8 @@ static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time
 
     // If it's time to retransmit
     if (current_time_us >= rtx_seg->time_sent + rto) {
-        printk("  [TCP] Retransmitting segment (retry %u)\n", rtx_seg->retransmit_count + 1);
+        VERBOSE_PRINT("  [TCP %x] Retransmitting segment (retry %u)\n", peer->sender.local_addr,
+               rtx_seg->retransmit_count + 1);
 
         // Update retransmission count and time
         rtx_seg->retransmit_count++;
@@ -630,6 +650,10 @@ static inline void tcp_send_new_data(tcp_peer_t *peer) {
     // Try to generate a new segment
     sender_segment_t *new_segment = sender_generate_segment(&peer->sender);
 
+    DEBUG_PRINT(" [TCP] Sending new data\n");
+    DEBUG_PRINT("      - new_segment->is_fin: %u\n", new_segment->is_fin);
+    DEBUG_PRINT("      - peer->state: %s\n", tcp_state_to_string(peer->state));
+
     if (new_segment) {
         // Create a TCP segment with the new data
         tcp_segment_t data_segment = {0};
@@ -639,10 +663,10 @@ static inline void tcp_send_new_data(tcp_peer_t *peer) {
         // If the app closed during FIN_WAIT_1, add an ACK to the FIN
         if (new_segment->is_fin && peer->state == TCP_CLOSE_WAIT) {
             peer->state = TCP_LAST_ACK;
-            printk("  [TCP] Sending FIN, entering LAST_ACK state\n");
+            VERBOSE_PRINT("  [TCP %x] Sending FIN, entering LAST_ACK state\n", peer->sender.local_addr);
         } else if (new_segment->is_fin && peer->state == TCP_ESTABLISHED) {
             peer->state = TCP_FIN_WAIT_1;
-            printk("  [TCP] Sending FIN, entering FIN_WAIT_1 state\n");
+            VERBOSE_PRINT("  [TCP %x] Sending FIN, entering FIN_WAIT_1 state\n", peer->sender.local_addr);
         }
 
         // Send the segment
@@ -664,18 +688,18 @@ static inline void tcp_tick(tcp_peer_t *peer) {
     uint8_t buffer[RCP_TOTAL_SIZE];
     int ret = nrf_read_exact_timeout(peer->nrf, buffer, RCP_TOTAL_SIZE, 1000);
 
-    printk(" [NRF] Received packet at nrf: %x\n", peer->nrf->rxaddr);
+    DEBUG_PRINT(" [NRF] Received packet at nrf: %x\n", peer->nrf->rxaddr);
 
     if (ret > 0) {
         // Parse the datagram
         rcp_datagram_t datagram = rcp_datagram_init();
         if (!rcp_datagram_parse(&datagram, buffer, ret)) {
-            printk(" [RCP] Failed to parse datagram\n");
+            VERBOSE_PRINT(" [RCP] Failed to parse datagram\n");
             return;
         }
 
         if (!rcp_datagram_verify_checksum(&datagram)) {
-            printk(" [RCP] Checksum verification failed\n");
+            VERBOSE_PRINT(" [RCP] Checksum verification failed\n");
             return;
         }
 
@@ -689,7 +713,7 @@ static inline void tcp_tick(tcp_peer_t *peer) {
     // Check if TIME_WAIT timer has expired
     if (peer->state == TCP_TIME_WAIT && current_time >= peer->timeout_time_us) {
         peer->state = TCP_CLOSED;
-        printk("  [TCP] TIME_WAIT expired, connection closed\n");
+        VERBOSE_PRINT("  [TCP %x] TIME_WAIT expired, connection closed\n", peer->sender.local_addr);
     }
 
     // Check for retransmissions
@@ -727,7 +751,7 @@ static inline bool tcp_connect(tcp_peer_t *peer) {
 
     // Update state
     peer->state = TCP_SYN_SENT;
-    printk("  [TCP] Sent SYN, entering SYN_SENT state\n");
+    VERBOSE_PRINT("  [TCP %x] Sent SYN, entering SYN_SENT state\n", peer->sender.local_addr);
 
     return true;
 }
@@ -761,7 +785,7 @@ static inline void tcp_close(tcp_peer_t *peer) {
         case TCP_SYN_RECEIVED:
             // Abort connection attempt
             peer->state = TCP_CLOSED;
-            printk("  [TCP] Connection attempt aborted\n");
+            VERBOSE_PRINT("  [TCP %x] Connection attempt aborted\n", peer->sender.local_addr);
             break;
 
         default:
@@ -871,17 +895,22 @@ static inline bool tcp_is_active(tcp_peer_t *peer) {
         !bs_reader_finished(&peer->sender.reader) || !tcp_rtx_empty(&peer->rtx_queue);
     bool receiver_active = !bs_writer_finished(&peer->receiver.writer);
 
-    // If in TIME_WAIT state, check timer
+    // If in TIME_WAIT and timer has expired, close the connection
     if (peer->state == TCP_TIME_WAIT) {
-        return timer_get_usec() < peer->timeout_time_us;
+        peer->state = TCP_CLOSED;
+        bool timer_expired = timer_get_usec() >= peer->timeout_time_us;
+        if (timer_expired) {
+            VERBOSE_PRINT("  [TCP %x] TIME_WAIT expired, connection closed\n", peer->sender.local_addr);
+        }
+        return timer_expired;
     }
 
-    // Check if we should linger
-    uint32_t now = timer_get_usec();
-    bool lingering = peer->linger_after_streams_finish &&
-                     (now < peer->time_of_last_receipt + 10 * peer->initial_RTO_us);
-
-    return sender_active || receiver_active || lingering;
+    bool is_active = sender_active || receiver_active;
+    if (!is_active) {
+        peer->state = TCP_CLOSED;
+        VERBOSE_PRINT("  [TCP %x] Connection is not active\n", peer->sender.local_addr);
+    }
+    return is_active;
 }
 
 /**

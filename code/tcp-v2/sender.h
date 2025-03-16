@@ -130,6 +130,14 @@ static inline sender_segment_t *sender_generate_segment(sender_t *sender) {
 
     static sender_segment_t next_segment;
 
+    DEBUG_PRINT(" [SENDER] Generating segment\n");
+    DEBUG_PRINT("      - sender->next_seqno: %u\n", sender->next_seqno);
+    DEBUG_PRINT("      - bs_reader_finished(&sender->reader): %u\n",
+                bs_reader_finished(&sender->reader));
+    DEBUG_PRINT("      - bs_bytes_popped(&sender->reader): %u\n", bs_bytes_popped(&sender->reader));
+    DEBUG_PRINT("      - bs_bytes_available(&sender->reader): %u\n",
+                bs_bytes_available(&sender->reader));
+
     // If FIN has been sent, no more data can be pushed
     if (bs_reader_finished(&sender->reader) &&
         (sender->next_seqno > bs_bytes_popped(&sender->reader) + 1)) {
@@ -156,8 +164,7 @@ static inline sender_segment_t *sender_generate_segment(sender_t *sender) {
         uint32_t remaining_space = receiver_max_seqno - sender->next_seqno;
         next_segment = make_segment(sender, remaining_space);
         return &next_segment;
-    } else if (bs_reader_finished(&sender->reader) &&
-               sender->next_seqno == bs_bytes_popped(&sender->reader)) {
+    } else if (bs_reader_finished(&sender->reader)) {
         // If bytestream is finished and we haven't sent FIN yet, send it
         next_segment.seqno = sender->next_seqno;
         next_segment.is_syn = false;

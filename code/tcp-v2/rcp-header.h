@@ -11,6 +11,15 @@
 #define RCP_FLAG_SYN (1 << 1) /* SYN flag */
 #define RCP_FLAG_ACK (1 << 2) /* ACK flag */
 
+// #define DEBUG
+
+// Debug printing macros
+#ifdef DEBUG
+#define DEBUG_PRINT(fmt, args...) printk(fmt, ##args)
+#else
+#define DEBUG_PRINT(fmt, args...) /* nothing */
+#endif
+
 /*
  * RCP Header Format (11 bytes total):
  * Byte 0:     Checksum (1 byte)
@@ -172,11 +181,11 @@ static inline void rcp_header_parse(rcp_header_t *hdr, const void *data) {
 
     const uint8_t *bytes = (const uint8_t *)data;
 
-    printk("    [RCP] unparsed header bytes: ");
+    DEBUG_PRINT("    [RCP] unparsed header bytes: ");
     for (size_t i = 0; i < RCP_HEADER_LENGTH; i++) {
-        printk("%x ", bytes[i]);
+        DEBUG_PRINT("%x ", bytes[i]);
     }
-    printk("\n");
+    DEBUG_PRINT("\n");
 
     hdr->cksum = bytes[0];
     hdr->dst = bytes[1];
@@ -187,15 +196,15 @@ static inline void rcp_header_parse(rcp_header_t *hdr, const void *data) {
     hdr->window = (bytes[8] << 8) | bytes[9];
     hdr->payload_len = bytes[10];
 
-    printk("    [RCP] parsed header\n");
-    printk("      - src: %u\n", hdr->src);
-    printk("      - dst: %u\n", hdr->dst);
-    printk("      - seqno: %u\n", hdr->seqno);
-    printk("      - ackno: %u\n", hdr->ackno);
-    printk("      - syn: %u\n", rcp_has_flag(hdr, RCP_FLAG_SYN));
-    printk("      - ack: %u\n", rcp_has_flag(hdr, RCP_FLAG_ACK));
-    printk("      - fin: %u\n", rcp_has_flag(hdr, RCP_FLAG_FIN));
-    printk("      - payload_len: %u\n", hdr->payload_len);
+    DEBUG_PRINT("    [RCP] parsed header\n");
+    DEBUG_PRINT("      - src: %u\n", hdr->src);
+    DEBUG_PRINT("      - dst: %u\n", hdr->dst);
+    DEBUG_PRINT("      - seqno: %u\n", hdr->seqno);
+    DEBUG_PRINT("      - ackno: %u\n", hdr->ackno);
+    DEBUG_PRINT("      - syn: %u\n", rcp_has_flag(hdr, RCP_FLAG_SYN));
+    DEBUG_PRINT("      - ack: %u\n", rcp_has_flag(hdr, RCP_FLAG_ACK));
+    DEBUG_PRINT("      - fin: %u\n", rcp_has_flag(hdr, RCP_FLAG_FIN));
+    DEBUG_PRINT("      - payload_len: %u\n", hdr->payload_len);
 }
 
 /* Serialize an RCP header structure into network data */
@@ -204,15 +213,15 @@ static inline void rcp_header_serialize(const rcp_header_t *hdr, void *data) {
         return;
     }
 
-    printk("    [RCP] serializing header\n");
-    printk("      - src: %u\n", hdr->src);
-    printk("      - dst: %u\n", hdr->dst);
-    printk("      - seqno: %u\n", hdr->seqno);
-    printk("      - ackno: %u\n", hdr->ackno);
-    printk("      - syn: %u\n", rcp_has_flag(hdr, RCP_FLAG_SYN));
-    printk("      - ack: %u\n", rcp_has_flag(hdr, RCP_FLAG_ACK));
-    printk("      - fin: %u\n", rcp_has_flag(hdr, RCP_FLAG_FIN));
-    printk("      - payload_len: %u\n", hdr->payload_len);
+    DEBUG_PRINT("    [RCP] serializing header\n");
+    DEBUG_PRINT("      - src: %u\n", hdr->src);
+    DEBUG_PRINT("      - dst: %u\n", hdr->dst);
+    DEBUG_PRINT("      - seqno: %u\n", hdr->seqno);
+    DEBUG_PRINT("      - ackno: %u\n", hdr->ackno);
+    DEBUG_PRINT("      - syn: %u\n", rcp_has_flag(hdr, RCP_FLAG_SYN));
+    DEBUG_PRINT("      - ack: %u\n", rcp_has_flag(hdr, RCP_FLAG_ACK));
+    DEBUG_PRINT("      - fin: %u\n", rcp_has_flag(hdr, RCP_FLAG_FIN));
+    DEBUG_PRINT("      - payload_len: %u\n", hdr->payload_len);
 
     uint8_t *bytes = (uint8_t *)data;
 
@@ -228,9 +237,9 @@ static inline void rcp_header_serialize(const rcp_header_t *hdr, void *data) {
     bytes[9] = hdr->window & 0xFF;
     bytes[10] = hdr->payload_len;
 
-    printk("    [RCP] serialized header bytes: ");
+    DEBUG_PRINT("    [RCP] serialized header bytes: ");
     for (size_t i = 0; i < RCP_HEADER_LENGTH; i++) {
-        printk("%x ", bytes[i]);
+        DEBUG_PRINT("%x ", bytes[i]);
     }
-    printk("\n");
+    DEBUG_PRINT("\n");
 }
