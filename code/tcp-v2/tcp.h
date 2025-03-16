@@ -1,9 +1,18 @@
 #pragma once
 
+#include "bytestream.h"
+#include "nrf.h"
+#include "queue-ext-T.h"
 #include "receiver.h"
+#include "router.h"
 #include "sender.h"
+#include "types.h"
 
 /********* TYPES *********/
+
+#define S_TO_US(s) ((s) * 1000000)
+#define RTO_INITIAL_US S_TO_US(1)
+#define TIME_WAIT_DURATION_US S_TO_US(2) /* 2-second TIME_WAIT */
 
 /* TCP connection states for proper handshake tracking */
 typedef enum tcp_state {
@@ -20,654 +29,645 @@ typedef enum tcp_state {
     TCP_TIME_WAIT     /* Waiting for delayed segments to expire */
 } tcp_state_t;
 
+static inline const char *tcp_state_to_string(tcp_state_t state) {
+    switch (state) {
+        case TCP_CLOSED:
+            return "CLOSED";
+        case TCP_LISTEN:
+            return "LISTEN";
+        case TCP_SYN_SENT:
+            return "SYN_SENT";
+        case TCP_SYN_RECEIVED:
+            return "SYN_RECEIVED";
+        case TCP_ESTABLISHED:
+            return "ESTABLISHED";
+        case TCP_FIN_WAIT_1:
+            return "FIN_WAIT_1";
+        case TCP_FIN_WAIT_2:
+            return "FIN_WAIT_2";
+        case TCP_CLOSE_WAIT:
+            return "CLOSE_WAIT";
+        case TCP_CLOSING:
+            return "CLOSING";
+        case TCP_LAST_ACK:
+            return "LAST_ACK";
+        case TCP_TIME_WAIT:
+            return "TIME_WAIT";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+/* Callback function type for sending TCP segments */
+typedef void (*tcp_send_callback_t)(void *ctx, uint8_t src, uint8_t dst, const void *data,
+                                    size_t len);
+
+/* Unacknowledged TCP segment for retransmission */
+typedef struct unacked_tcp_segment {
+    struct unacked_tcp_segment *next; /* Next in queue */
+    tcp_segment_t segment;            /* Complete TCP segment (sender+receiver parts) */
+    uint32_t time_sent;               /* Time when this segment was sent */
+    uint32_t retransmit_count;        /* Number of times this segment has been retransmitted */
+} unacked_tcp_segment_t;
+
+/* Queue of unacknowledged segments */
+typedef struct tcp_rtx_queue {
+    unacked_tcp_segment_t *head, *tail;
+} tcp_rtx_queue_t;
+
+/* Generate queue functions for the TCP retransmission queue */
+gen_queue_T(tcp_rtx, tcp_rtx_queue_t, head, tail, unacked_tcp_segment_t, next);
+
 /* TCP peer structure representing a connection endpoint */
 typedef struct tcp_peer {
-    sender_t sender;     /* Sender component of the connection */
-    receiver_t receiver; /* Receiver component of the connection */
+    sender_t sender;     /* Sender component */
+    receiver_t receiver; /* Receiver component */
+
+    nrf_t *nrf;                        /* NRF interface for sending/receiving */
+    tcp_send_callback_t send_callback; /* Callback for sending segments */
+    void *callback_ctx;                /* Context for the callback */
 
     tcp_state_t state;                /* Current TCP connection state */
+    tcp_rtx_queue_t rtx_queue;        /* Queue of segments that need acknowledgment */
+    uint32_t initial_RTO_us;          /* Initial retransmission timeout */
     uint32_t time_of_last_receipt;    /* Time when last packet was received */
+    uint32_t timeout_time_us;         /* Timeout for current state (e.g., TIME_WAIT timer) */
     bool linger_after_streams_finish; /* Whether to linger after streams finish */
 } tcp_peer_t;
 
 /********* HELPER FUNCTIONS *********/
 
 /**
- * Convert an RCP datagram to a sender segment
+ * Convert an RCP datagram to a TCP segment
  *
  * @param datagram Pointer to the RCP datagram to convert
- * @return A sender segment structure containing the converted data
+ * @return A TCP segment structure containing the converted data
  */
-sender_segment_t rcp_to_sender_segment(rcp_datagram_t *datagram) {
+static inline tcp_segment_t rcp_to_tcp_segment(rcp_datagram_t *datagram) {
     assert(datagram);
 
-    sender_segment_t seg = {
-        .seqno = datagram->header.seqno,
-        .is_syn = rcp_has_flag(&datagram->header, RCP_FLAG_SYN),
-        .is_fin = rcp_has_flag(&datagram->header, RCP_FLAG_FIN),
-        .len = datagram->payload_len,
-    };
+    tcp_segment_t segment = {0};
 
-    /* Copy payload if present */
-    if (datagram->payload && datagram->payload_len > 0) {
-        memcpy(seg.payload, datagram->payload, seg.len);
+    // Check for sender-side information (SYN, FIN, or data)
+    bool has_sender_data = datagram->header.payload_len > 0 ||
+                           rcp_has_flag(&datagram->header, RCP_FLAG_SYN) ||
+                           rcp_has_flag(&datagram->header, RCP_FLAG_FIN);
+
+    // Check for receiver-side information (ACK)
+    bool has_receiver_data = rcp_has_flag(&datagram->header, RCP_FLAG_ACK);
+
+    // Extract sender segment if present
+    if (has_sender_data) {
+        segment.has_sender_segment = true;
+        segment.sender_segment.seqno = datagram->header.seqno;
+        segment.sender_segment.is_syn = rcp_has_flag(&datagram->header, RCP_FLAG_SYN);
+        segment.sender_segment.is_fin = rcp_has_flag(&datagram->header, RCP_FLAG_FIN);
+        segment.sender_segment.len = datagram->header.payload_len;
+
+        if (datagram->header.payload_len > 0) {
+            memcpy(segment.sender_segment.payload, datagram->payload, datagram->header.payload_len);
+        }
     }
 
-    return seg;
+    // Extract receiver segment if present
+    if (has_receiver_data) {
+        segment.has_receiver_segment = true;
+        segment.receiver_segment.ackno = datagram->header.ackno;
+        segment.receiver_segment.is_ack = true;
+        segment.receiver_segment.window_size = datagram->header.window;
+    }
+
+    return segment;
 }
 
 /**
- * Convert an RCP datagram to a receiver segment
+ * Convert a TCP segment to an RCP datagram
  *
- * @param datagram Pointer to the RCP datagram to convert
- * @return A receiver segment structure containing the converted data
+ * @param segment Pointer to the TCP segment to convert
+ * @param src Source RCP address
+ * @param dst Destination RCP address
+ * @return An RCP datagram containing the converted data
  */
-receiver_segment_t rcp_to_receiver_segment(rcp_datagram_t *datagram) {
-    assert(datagram);
-
-    receiver_segment_t seg = {
-        .ackno = datagram->header.ackno,
-        .is_ack = rcp_has_flag(&datagram->header, RCP_FLAG_ACK),
-        .window_size = datagram->header.window,
-    };
-
-    return seg;
-}
-
-/**
- * Create an RCP datagram with both SYN and ACK flags
- *
- * @param sender The sender to set up the segment
- * @param receiver The receiver to set up the acknowledgment
- * @param ackno The acknowledgment number to use
- * @return A properly formatted RCP datagram with SYN and ACK flags
- */
-rcp_datagram_t create_syn_ack_datagram(sender_t *sender, receiver_t *receiver, uint32_t ackno) {
-    assert(sender);
-    assert(receiver);
+static inline rcp_datagram_t tcp_segment_to_rcp(tcp_segment_t *segment, uint8_t src, uint8_t dst) {
+    assert(segment);
 
     rcp_datagram_t datagram = rcp_datagram_init();
 
-    /* Set the source and destination addresses */
-    datagram.header.src = sender->local_addr;
-    datagram.header.dst = sender->remote_addr;
+    // Set addressing
+    datagram.header.src = src;
+    datagram.header.dst = dst;
 
-    /* Set SYN and ACK flags */
-    rcp_set_flag(&datagram.header, RCP_FLAG_SYN);
-    rcp_set_flag(&datagram.header, RCP_FLAG_ACK);
+    // Set sender information if present
+    if (segment->has_sender_segment) {
+        datagram.header.seqno = segment->sender_segment.seqno;
 
-    /* Set the sequence number from the sender */
-    datagram.header.seqno = sender->next_seqno;
+        if (segment->sender_segment.is_syn) {
+            rcp_set_flag(&datagram.header, RCP_FLAG_SYN);
+        }
 
-    /* Set the acknowledgment number */
-    datagram.header.ackno = ackno;
+        if (segment->sender_segment.is_fin) {
+            rcp_set_flag(&datagram.header, RCP_FLAG_FIN);
+        }
 
-    /* Set the window size from the receiver */
-    datagram.header.window = receiver->window_size;
+        if (segment->sender_segment.len > 0) {
+            rcp_datagram_set_payload(&datagram, segment->sender_segment.payload,
+                                     segment->sender_segment.len);
+        }
+    }
 
-    /* Zero out the payload length as SYN-ACK has no payload */
-    datagram.payload_len = 0;
+    // Set receiver information if present
+    if (segment->has_receiver_segment) {
+        rcp_set_flag(&datagram.header, RCP_FLAG_ACK);
+        datagram.header.ackno = segment->receiver_segment.ackno;
+        datagram.header.window = segment->receiver_segment.window_size;
+    }
 
-    /* Compute the checksum */
+    // Compute checksum
     rcp_datagram_compute_checksum(&datagram);
 
     return datagram;
 }
 
-/********* TCP PEER *********/
+/********* DEFAULT SEND CALLBACK *********/
 
 /**
- * Initialize a new TCP peer
+ * Default implementation of the send callback using NRF
  *
- * @param sender_nrf The NRF interface to use for sending segments
- * @param receiver_nrf The NRF interface to use for receiving segments
- * @param local_addr The local RCP address
- * @param remote_addr The remote RCP address
+ * @param ctx Callback context (expected to be a tcp_peer_t pointer)
+ * @param src Source RCP address
+ * @param dst Destination RCP address
+ * @param data Data to send
+ * @param len Length of data to send
+ */
+static inline void tcp_default_send_callback(void *ctx, uint8_t src, uint8_t dst, const void *data,
+                                             size_t len) {
+    tcp_peer_t *peer = (tcp_peer_t *)ctx;
+    assert(peer);
+    printk("  [CALLBACK] peer_local: %u, peer_remote: %u, peer_local_nrf: %x, src: %u, dst: %u\n",
+           peer->sender.local_addr, peer->sender.remote_addr, peer->nrf->rxaddr, src, dst);
+    assert(peer->sender.local_addr == src);
+    assert(peer->sender.remote_addr == dst);
+
+    // Get the next hop NRF address from the routing table
+    uint32_t next_hop_nrf = rtable_map[src][dst];
+
+    printk(" [NRF] Sending data from %u (nrf: %x) to %u (nrf: %x)\n", src, peer->nrf->rxaddr, dst,
+           next_hop_nrf);
+
+    // Send the data via NRF
+    nrf_send_noack(peer->nrf, next_hop_nrf, data, len);
+}
+
+/********* TCP PEER IMPLEMENTATION *********/
+
+/**
+ * Initialize a TCP peer with default state
+ *
+ * @param nrf The NRF interface for sending/receiving
+ * @param local_addr Local RCP address
+ * @param remote_addr Remote RCP address
  * @param is_server Whether this peer should act as a server (passive open)
  * @return Initialized TCP peer structure
  */
-static inline tcp_peer_t tcp_peer_init(nrf_t *sender_nrf, nrf_t *receiver_nrf, uint8_t local_addr,
-                                       uint8_t remote_addr, bool is_server) {
-    tcp_peer_t peer;
+static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t remote_addr,
+                                       bool is_server) {
+    tcp_peer_t peer = {.sender = sender_init(local_addr, remote_addr),
+                       .receiver = receiver_init(local_addr, remote_addr),
+                       .nrf = nrf,
+                       .send_callback = tcp_default_send_callback,
+                       .callback_ctx = NULL,  // Will be set to &peer after initialization
+                       .state = is_server ? TCP_LISTEN : TCP_CLOSED,
+                       .initial_RTO_us = RTO_INITIAL_US,
+                       .time_of_last_receipt = timer_get_usec(),
+                       .timeout_time_us = 0,
+                       .linger_after_streams_finish = true};
 
-    peer.sender = sender_init(sender_nrf, local_addr, remote_addr);
-    peer.receiver = receiver_init(receiver_nrf, local_addr, remote_addr);
+    // Initialize retransmission queue
+    tcp_rtx_init(&peer.rtx_queue);
 
-    peer.time_of_last_receipt = timer_get_usec(); /* Initialize to current time */
-    peer.linger_after_streams_finish = true;
+    // Set self as callback context
+    peer.callback_ctx = &peer;
 
-    /* Set initial state based on role */
-    peer.state = is_server ? TCP_LISTEN : TCP_CLOSED;
+    // Verify the callback context
+    tcp_peer_t *verify_peer = (tcp_peer_t *)peer.callback_ctx;
+    assert(verify_peer == &peer);
+    assert(verify_peer->sender.local_addr == peer.sender.local_addr);
+    assert(verify_peer->sender.remote_addr == peer.sender.remote_addr);
+    assert(verify_peer->receiver.local_addr == peer.receiver.local_addr);
+    assert(verify_peer->receiver.remote_addr == peer.receiver.remote_addr);
+    assert(verify_peer->state == peer.state);
 
     return peer;
 }
 
 /**
- * Create and send a SYN segment to initiate a connection
+ * Set a custom send callback
  *
- * @param peer The TCP peer initiating the connection
- * @return True if successful, false otherwise
+ * @param peer The TCP peer to update
+ * @param callback The callback function to use
+ * @param ctx Context to pass to the callback
  */
-static inline bool tcp_send_syn(tcp_peer_t *peer) {
+static inline void tcp_set_send_callback(tcp_peer_t *peer, tcp_send_callback_t callback,
+                                         void *ctx) {
     assert(peer);
 
-    /* Create a SYN segment with the initial sequence number 0 */
-    sender_segment_t syn_seg = {
-        .seqno = 0, /* Initial sequence number */
-        .is_syn = true,
-        .is_fin = false,
-        .len = 0 /* SYN has no payload */
-    };
-
-    /* Queue the SYN segment for sending */
-    sender_send_segment(&peer->sender, syn_seg);
-    printk("  [SEND %x] SYN with seqno %u\n", peer->sender.local_addr, syn_seg.seqno);
-    peer->state = TCP_SYN_SENT;
-
-    return true;
+    peer->send_callback = callback;
+    peer->callback_ctx = ctx;
 }
 
 /**
- * Create and send a SYN-ACK segment in response to a SYN
+ * Send a TCP segment using the configured callback
  *
- * @param peer The TCP peer responding to a SYN
- * @param recv_seqno The sequence number received in the SYN
- * @return True if successful, false otherwise
+ * @param peer The TCP peer sending the segment
+ * @param segment The segment to send
+ * @param needs_ack Whether this segment needs acknowledgment (should be added to rtx queue)
  */
-static inline bool tcp_send_syn_ack(tcp_peer_t *peer, uint32_t recv_seqno) {
-    assert(peer);
-
-    /* Create the SYN-ACK datagram */
-    rcp_datagram_t datagram =
-        create_syn_ack_datagram(&peer->sender, &peer->receiver, recv_seqno + 1);
-
-    /* Serialize the datagram */
-    uint8_t buffer[RCP_TOTAL_SIZE];
-    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
-
-    /* Send the SYN-ACK to the remote peer */
-    uint32_t next_hop_nrf = rtable_map[peer->sender.local_addr][peer->sender.remote_addr];
-    printk("  [SEND %x] sending reply from %u (%x) to %u (%x) with length %u\n",
-           peer->sender.local_addr, peer->sender.local_addr, peer->sender.nrf->rxaddr,
-           peer->sender.remote_addr, next_hop_nrf, length);
-    nrf_send_noack(peer->sender.nrf, next_hop_nrf, buffer, length);
-
-    printk("  [SEND %x] SYN-ACK with seqno %u, ackno %u\n", peer->sender.local_addr,
-           peer->sender.next_seqno, recv_seqno + 1);
-
-    /* Create a pending segment for retransmission if needed */
-    sender_segment_t syn_ack_seg = {
-        .seqno = peer->sender.next_seqno, /* Current sequence number */
-        .is_syn = true,
-        .is_fin = false,
-        .len = 0 /* SYN-ACK has no payload */
-    };
-
-    /* Add to the retransmission queue */
-    unacked_segment_t *pending = kmalloc(sizeof(unacked_segment_t));
-    if (pending) {
-        memcpy(&pending->seg, &syn_ack_seg, sizeof(sender_segment_t));
-        pending->next = NULL;
-
-        if (rtq_empty(&peer->sender.pending_segs)) {
-            peer->sender.rto_time_us = timer_get_usec() + peer->sender.initial_RTO_us;
-        }
-
-        rtq_push(&peer->sender.pending_segs, pending);
-    }
-
-    /* Update the sender's sequence number AFTER creating the segment */
-    peer->sender.next_seqno++;
-
-    peer->state = TCP_SYN_RECEIVED;
-    return true;
-}
-
-/**
- * Send a FIN segment to initiate connection termination
- *
- * @param peer The TCP peer initiating termination
- * @return True if successful, false otherwise
- */
-static inline bool tcp_send_fin(tcp_peer_t *peer) {
-    assert(peer);
-
-    /* Create a FIN segment */
-    sender_segment_t fin_seg = {
-        .seqno = peer->sender.next_seqno,
-        .is_syn = false,
-        .is_fin = true,
-        .len = 0 /* FIN has no payload */
-    };
-
-    /* Queue the FIN segment for sending */
-    sender_send_segment(&peer->sender, fin_seg);
-    printk("  [SEND %x] FIN with seqno %u\n", peer->sender.local_addr, fin_seg.seqno);
-
-    /* Update state based on current state */
-    if (peer->state == TCP_ESTABLISHED) {
-        peer->state = TCP_FIN_WAIT_1;
-    } else if (peer->state == TCP_CLOSE_WAIT) {
-        peer->state = TCP_LAST_ACK;
-    }
-
-    return true;
-}
-
-/**
- * Process a received FIN segment
- *
- * @param peer The TCP peer processing the FIN
- * @param segment The received segment with FIN flag
- */
-static inline void tcp_process_fin(tcp_peer_t *peer, sender_segment_t *segment) {
+static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bool needs_ack) {
     assert(peer);
     assert(segment);
 
-    printk("  [RECV %x] FIN from %u\n", peer->receiver.local_addr, segment->seqno);
+    // Convert TCP segment to RCP datagram
+    rcp_datagram_t datagram =
+        tcp_segment_to_rcp(segment, peer->sender.local_addr, peer->sender.remote_addr);
 
-    /* Mark receiver as having received FIN */
-    peer->receiver.fin_received = true;
-
-    /* Calculate the next expected sequence number (after FIN) */
-    uint32_t next_seqno = segment->seqno + segment->len + 1; /* +1 for FIN */
-
-    /* Send an ACK for the FIN */
-    receiver_segment_t ack = {
-        .ackno = next_seqno, .is_ack = true, .window_size = peer->receiver.window_size};
-
-    sender_send_ack(&peer->sender, &ack);
-    printk("  [SEND %x] ACK for FIN with ackno %u\n", peer->sender.local_addr, ack.ackno);
-
-    /* Update state based on current state */
-    if (peer->state == TCP_ESTABLISHED) {
-        // Remote sent FIN - we are waiting for our app to close and send our FIN
-        peer->state = TCP_CLOSE_WAIT;
-    } else if (peer->state == TCP_FIN_WAIT_1) {
-        // We sent FIN and received a FIN from remote - both sides initiating close
-        peer->state = TCP_CLOSING;
-    } else if (peer->state == TCP_FIN_WAIT_2) {
-        // We sent FIN and received an ACK - when we receive remote FIN, we reply
-        // with an ACK and idle in case there are delayed segments in transit
-        peer->state = TCP_TIME_WAIT;
-    }
-
-    /* Close the receiving bytestream */
-    bs_end_input(&peer->receiver.writer);
-}
-
-/**
- * Process an ACK for a sent FIN
- *
- * @param peer The TCP peer processing the ACK
- * @param ackno The acknowledgment number in the ACK
- */
-static inline void tcp_process_fin_ack(tcp_peer_t *peer, uint32_t ackno) {
-    assert(peer);
-
-    printk("  [RECV %x] ACK for FIN with ackno %u\n", peer->receiver.local_addr, ackno);
-
-    /* Update state based on current state */
-    if (peer->state == TCP_FIN_WAIT_1) {
-        peer->state = TCP_FIN_WAIT_2;
-    } else if (peer->state == TCP_CLOSING) {
-        peer->state = TCP_TIME_WAIT;
-    } else if (peer->state == TCP_LAST_ACK) {
-        peer->state = TCP_CLOSED;
-    }
-}
-
-/**
- * Process incoming segments from the remote peer and handle handshake steps
- *
- * @param peer The TCP peer to process
- */
-static inline void tcp_check_incoming(tcp_peer_t *peer) {
-    assert(peer);
-
+    // Serialize the datagram
     uint8_t buffer[RCP_TOTAL_SIZE];
+    int length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
 
-    /* Try to receive a packet from NRF with a 1 ms timeout */
-    int ret = nrf_read_exact_timeout(peer->receiver.nrf, buffer, RCP_TOTAL_SIZE, 1000);
-    if (ret <= 0) {
-        return; /* No data or error */
+    if (length <= 0) {
+        printk("  [TCP] Failed to serialize datagram\n");
+        return;
     }
 
-    printk("  [RECV %x] packet with length %u\n", peer->receiver.local_addr, ret);
-
-    /* Try to parse the read packet into an RCP datagram */
-    rcp_datagram_t datagram = rcp_datagram_init();
-    if (rcp_datagram_parse(&datagram, buffer, ret) <= 0) {
-        printk("  [RECV %x] failed to parse packet\n", peer->receiver.local_addr);
-        return; /* Parsing failed */
+    // Log sending information
+    printk("  [TCP] Sending segment: ");
+    if (segment->has_sender_segment) {
+        printk("seqno=%u ", segment->sender_segment.seqno);
+        if (segment->sender_segment.is_syn)
+            printk("SYN ");
+        if (segment->sender_segment.is_fin)
+            printk("FIN ");
+        printk("len=%u ", segment->sender_segment.len);
     }
-
-    /* Verify the checksum of the received packet */
-    if (!rcp_datagram_verify_checksum(&datagram)) {
-        printk("  [RECV %x] invalid checksum\n", peer->receiver.local_addr);
-        return; /* Invalid checksum */
+    if (segment->has_receiver_segment) {
+        printk("ackno=%u ", segment->receiver_segment.ackno);
+        if (segment->receiver_segment.is_ack)
+            printk("ACK ");
+        printk("window=%u ", segment->receiver_segment.window_size);
     }
+    printk("\n");
 
-    /* Update time of last packet receipt */
+    // Send the segment using callback
+    printk("  [CALLBACK] sending segment\n");
+    peer->send_callback(peer->callback_ctx, peer->sender.local_addr, peer->sender.remote_addr,
+                        buffer, length);
+
+    // Add to retransmission queue if needed
+    if (needs_ack && segment->has_sender_segment &&
+        (segment->sender_segment.len > 0 || segment->sender_segment.is_syn ||
+         segment->sender_segment.is_fin)) {
+        // Create a new entry for the retransmission queue
+        unacked_tcp_segment_t *rtx_segment = kmalloc(sizeof(unacked_tcp_segment_t));
+        if (rtx_segment) {
+            // Copy the segment and record time sent
+            memcpy(&rtx_segment->segment, segment, sizeof(tcp_segment_t));
+            rtx_segment->time_sent = timer_get_usec();
+            rtx_segment->retransmit_count = 0;
+            rtx_segment->next = NULL;
+
+            // Add to queue
+            tcp_rtx_push(&peer->rtx_queue, rtx_segment);
+
+            // Update sender's sequence number
+            sender_segment_sent(&peer->sender, &segment->sender_segment);
+        }
+    } else if (segment->has_sender_segment) {
+        // Update sender's sequence number even if we don't need acknowledgment
+        sender_segment_sent(&peer->sender, &segment->sender_segment);
+    }
+}
+
+/**
+ * Process an incoming TCP segment
+ *
+ * @param peer The TCP peer processing the segment
+ * @param segment The segment to process
+ */
+static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment) {
+    assert(peer);
+    assert(segment);
+
+    printk(" [TCP] RCP %u: Processing received segment in state %s\n", peer->sender.local_addr,
+           tcp_state_to_string(peer->state));
+    printk("      - has_sender_segment: %u\n", segment->has_sender_segment);
+    printk("      - has_receiver_segment: %u\n", segment->has_receiver_segment);
+    if (segment->has_sender_segment) {
+        printk("      - sender_segment.seqno: %u\n", segment->sender_segment.seqno);
+        printk("      - sender_segment.is_syn: %u\n", segment->sender_segment.is_syn);
+        printk("      - sender_segment.is_fin: %u\n", segment->sender_segment.is_fin);
+        printk("      - sender_segment.len: %u\n", segment->sender_segment.len);
+    }
+    if (segment->has_receiver_segment) {
+        printk("      - receiver_segment.ackno: %u\n", segment->receiver_segment.ackno);
+        printk("      - receiver_segment.is_ack: %u\n", segment->receiver_segment.is_ack);
+        printk("      - receiver_segment.window_size: %u\n", segment->receiver_segment.window_size);
+    }
+    printk("\n\n");
+
+    // Update activity timestamp
     peer->time_of_last_receipt = timer_get_usec();
 
-    /* Extract flags for processing */
-    bool is_syn = rcp_has_flag(&datagram.header, RCP_FLAG_SYN);
-    bool is_ack = rcp_has_flag(&datagram.header, RCP_FLAG_ACK);
-    bool is_fin = rcp_has_flag(&datagram.header, RCP_FLAG_FIN);
+    // Process receiver part with sender
+    if (segment->has_receiver_segment && segment->receiver_segment.is_ack) {
+        printk(" [TCP] Processing ACK\n");
+        // Update sender's acknowledged sequence number
+        sender_process_ack(&peer->sender, &segment->receiver_segment);
 
-    /* Process based on the current TCP state */
-    switch (peer->state) {
-        case TCP_LISTEN:
-            /* Server is listening for connections */
-            if (is_syn && !is_ack) {
-                /* Received SYN: Send SYN-ACK */
-                printk("  [RECV %x] SYN from %u\n", peer->receiver.local_addr,
-                       datagram.header.seqno);
+        // Remove acknowledged segments from retransmission queue
+        while (!tcp_rtx_empty(&peer->rtx_queue)) {
+            unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
 
-                /* Set receiver's initial sequence number */
-                peer->receiver.syn_received = true;
-                peer->receiver.next_seqno = datagram.header.seqno + 1;
-
-                /* Reset sender's sequence number to 0 for a new connection */
-                peer->sender.next_seqno = 0;
-
-                /* Send SYN-ACK */
-                tcp_send_syn_ack(peer, datagram.header.seqno);
-            }
-            break;
-
-        case TCP_SYN_SENT:
-            /* Client has sent SYN, waiting for response */
-            if (is_syn && is_ack) {
-                /* Received SYN-ACK: Send ACK */
-                printk("  [RECV %x] SYN-ACK from %u with ackno %u\n", peer->receiver.local_addr,
-                       datagram.header.seqno, datagram.header.ackno);
-
-                /* Update sender's acknowledged sequence number */
-                peer->sender.acked_seqno = datagram.header.ackno;
-
-                /* Update receiver's sequence number */
-                peer->receiver.syn_received = true;
-                peer->receiver.next_seqno = datagram.header.seqno + 1;
-
-                /* Send ACK for the SYN-ACK */
-                receiver_segment_t ack = {.ackno = datagram.header.seqno + 1,
-                                          .is_ack = true,
-                                          .window_size = peer->receiver.window_size};
-
-                sender_send_ack(&peer->sender, &ack);
-                printk("  [SEND %x] ACK with ackno %u\n", peer->sender.local_addr, ack.ackno);
-
-                /* Connection is now established */
-                peer->state = TCP_ESTABLISHED;
-                printk("  [INFO] Connection established\n");
-
-                /* Remove SYN from pending segments queue since it was ACKed */
-                if (!rtq_empty(&peer->sender.pending_segs)) {
-                    unacked_segment_t *seg = rtq_start(&peer->sender.pending_segs);
-                    if (seg->seg.is_syn) {
-                        rtq_pop(&peer->sender.pending_segs);
-                    }
-                }
-            } else if (is_syn && !is_ack) {
-                /* Simultaneous open - received SYN while in SYN_SENT */
-                printk("  [RECV %x] SYN from %u (simultaneous open)\n", peer->receiver.local_addr,
-                       datagram.header.seqno);
-
-                /* Update receiver's sequence number */
-                peer->receiver.next_seqno = datagram.header.seqno + 1;
-
-                /* Send SYN-ACK using our existing sequence number - don't reset it */
-                tcp_send_syn_ack(peer, datagram.header.seqno);
-            }
-            break;
-
-        case TCP_SYN_RECEIVED:
-            /* Server has sent SYN-ACK, waiting for ACK */
-            if (is_ack && !is_syn) {
-                /* Received ACK for SYN-ACK: Connection established */
-                printk("  [RECV %x] ACK with ackno %u\n", peer->receiver.local_addr,
-                       datagram.header.ackno);
-
-                /* Process the ACK */
-                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
-                sender_process_reply(&peer->sender, &ack_segment);
-
-                /* Connection is now established */
-                peer->state = TCP_ESTABLISHED;
-                printk("  [INFO] Connection established\n");
-            }
-            /* If in SYN_RECEIVED and receive SYN, resend SYN-ACK (our SYN-ACK was probably lost) */
-            else if (is_syn && !is_ack) {
-                /* Received SYN again: Resend SYN-ACK */
-                printk("  [RECV %x] Duplicate SYN from %u\n", peer->receiver.local_addr,
-                       datagram.header.seqno);
-
-                /* Update receiver's initial sequence number if needed */
-                peer->receiver.syn_received = true;
-                peer->receiver.next_seqno = datagram.header.seqno + 1;
-
-                /* Resend SYN-ACK - don't modify our sequence number */
-                rcp_datagram_t datagram = create_syn_ack_datagram(&peer->sender, &peer->receiver,
-                                                                  peer->receiver.next_seqno);
-
-                /* Serialize the datagram */
-                uint8_t buffer[RCP_TOTAL_SIZE];
-                uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
-
-                /* Send the SYN-ACK to the remote peer */
-                uint32_t next_hop_nrf =
-                    rtable_map[peer->sender.local_addr][peer->sender.remote_addr];
-                nrf_send_noack(peer->sender.nrf, next_hop_nrf, buffer, length);
-
-                printk("  [SEND %x] Resending SYN-ACK with seqno %u, ackno %u\n",
-                       peer->sender.local_addr, peer->sender.next_seqno - 1, datagram.header.ackno);
-            }
-            break;
-
-        case TCP_ESTABLISHED:
-            /* Connection is established, handle normal data flow and termination */
-            if (is_fin) {
-                /* Process FIN segment */
-                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
-                tcp_process_fin(peer, &fin_segment);
-            } else if (is_ack) {
-                /* Process ACK */
-                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
-                printk("  [RECV %x] ACK from %u with window size %u\n", peer->receiver.local_addr,
-                       ack_segment.ackno, ack_segment.window_size);
-                sender_process_reply(&peer->sender, &ack_segment);
+            // Only consider segments with sender data
+            if (!rtx_seg->segment.has_sender_segment) {
+                tcp_rtx_pop(&peer->rtx_queue);
+                continue;
             }
 
-            /* Process data segment if present */
-            if (datagram.payload_len > 0) {
-                sender_segment_t data_segment = rcp_to_sender_segment(&datagram);
-                printk("  [RECV %x] segment from %u to %u with length %u\n",
-                       peer->receiver.local_addr, data_segment.seqno,
-                       data_segment.seqno + data_segment.len, data_segment.len);
-                recv_process_segment(&peer->receiver, &data_segment);
-            }
-            break;
+            // Calculate end sequence number for this segment
+            uint16_t seg_end_seqno =
+                rtx_seg->segment.sender_segment.seqno + rtx_seg->segment.sender_segment.len;
 
-        case TCP_FIN_WAIT_1:
-            /* We've sent FIN, waiting for ACK and maybe FIN */
-            if (is_fin) {
-                /* Process FIN segment (could be simultaneous close) */
-                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
-                tcp_process_fin(peer, &fin_segment);
+            if (rtx_seg->segment.sender_segment.is_syn || rtx_seg->segment.sender_segment.is_fin) {
+                seg_end_seqno++;
             }
 
-            if (is_ack) {
-                /* Process ACK - could be ACK for our FIN */
-                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
-
-                /* Check if this ACK is for our FIN */
-                if (ack_segment.ackno == peer->sender.next_seqno) {
-                    printk("  [RECV %x] FIN_WAIT_1 ACK for FIN with ackno %u\n",
-                           peer->receiver.local_addr, ack_segment.ackno);
-                    tcp_process_fin_ack(peer, ack_segment.ackno);
-                } else {
-                    printk("  [RECV %x] FIN_WAIT_1 ACK from %u with window size %u\n",
-                           peer->receiver.local_addr, ack_segment.ackno, ack_segment.window_size);
-                    /* Regular ACK, not for our FIN */
-                    sender_process_reply(&peer->sender, &ack_segment);
-                }
-            }
-            break;
-
-        case TCP_FIN_WAIT_2:
-            /* Our FIN has been ACKed, waiting for remote FIN */
-            if (is_fin) {
-                /* Process FIN segment */
-                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
-                tcp_process_fin(peer, &fin_segment);
-            }
-            break;
-
-        case TCP_CLOSE_WAIT:
-            /* Remote has sent FIN, we've ACKed it, app needs to close */
-            if (is_ack) {
-                /* Process ACK */
-                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
-                sender_process_reply(&peer->sender, &ack_segment);
-            }
-            break;
-
-        case TCP_CLOSING:
-            /* Both sides initiated close */
-            if (is_ack) {
-                /* Process ACK - could be ACK for our FIN */
-                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
-
-                /* Check if this ACK is for our FIN */
-                if (ack_segment.ackno == peer->sender.next_seqno) {
-                    tcp_process_fin_ack(peer, ack_segment.ackno);
-                } else {
-                    /* Regular ACK */
-                    sender_process_reply(&peer->sender, &ack_segment);
-                }
-            }
-            break;
-
-        case TCP_LAST_ACK:
-            /* We sent FIN after receiving remote FIN, waiting for ACK */
-            if (is_ack) {
-                /* Process ACK - could be ACK for our FIN */
-                receiver_segment_t ack_segment = rcp_to_receiver_segment(&datagram);
-
-                /* Check if this ACK is for our FIN */
-                if (ack_segment.ackno == peer->sender.next_seqno) {
-                    tcp_process_fin_ack(peer, ack_segment.ackno);
-                } else {
-                    /* Regular ACK */
-                    sender_process_reply(&peer->sender, &ack_segment);
-                }
-            }
-            break;
-
-        case TCP_TIME_WAIT:
-            /* We're waiting for delayed segments to expire */
-            /* Just ACK any duplicate FINs that might arrive */
-            if (is_fin) {
-                sender_segment_t fin_segment = rcp_to_sender_segment(&datagram);
-
-                /* Send an ACK for the FIN */
-                receiver_segment_t ack = {.ackno = fin_segment.seqno + fin_segment.len + 1,
-                                          .is_ack = true,
-                                          .window_size = peer->receiver.window_size};
-
-                sender_send_ack(&peer->sender, &ack);
-            }
-            break;
-
-        case TCP_CLOSED:
-            /* Connection is closed, ignore packets */
-            break;
-    }
-}
-
-/**
- * Actively open a connection (client side) by sending a SYN
- *
- * @param peer The TCP peer to connect
- * @return True if successful, false otherwise
- */
-static inline bool tcp_connect(tcp_peer_t *peer) {
-    assert(peer);
-
-    if (peer->state == TCP_CLOSED) {
-        return tcp_send_syn(peer);
-    }
-
-    return false;
-}
-
-/**
- * Send any data that's pending in the sender's buffer to the remote
- *
- * @param peer The TCP peer to process
- */
-static inline void tcp_send_pending(tcp_peer_t *peer) {
-    assert(peer);
-
-    /* Check if a FIN needs to be sent */
-    bool should_send_fin = false;
-
-    /* Send FIN if we're in FIN_WAIT_1 or LAST_ACK and we need to initiate closure */
-    if ((peer->state == TCP_FIN_WAIT_1 || peer->state == TCP_LAST_ACK) &&
-        bs_reader_finished(&peer->sender.reader)) {
-        /* Check if we've already sent a FIN */
-        bool fin_already_sent = false;
-        unacked_segment_t *seg = rtq_start(&peer->sender.pending_segs);
-
-        while (seg != NULL) {
-            if (seg->seg.is_fin) {
-                fin_already_sent = true;
+            // If this segment is fully acknowledged, remove it
+            if (segment->receiver_segment.ackno >= seg_end_seqno) {
+                printk(
+                    " [TCP] Segment seqno %u fully acknowledged, removing from retransmission "
+                    "queue\n",
+                    rtx_seg->segment.sender_segment.seqno);
+                tcp_rtx_pop(&peer->rtx_queue);
+            } else {
+                // Stop at first unacknowledged segment
                 break;
             }
-            seg = seg->next;
         }
 
-        /* If no FIN has been sent yet, send one */
-        if (!fin_already_sent) {
-            should_send_fin = true;
+        // Process ACKs for connection management
+        switch (peer->state) {
+            case TCP_SYN_SENT:
+                if (segment->has_sender_segment && segment->sender_segment.is_syn) {
+                    // Received SYN-ACK in response to our SYN
+                    peer->state = TCP_ESTABLISHED;
+                    printk("  [TCP] Connection established (client side)\n");
+                }
+                break;
+
+            case TCP_SYN_RECEIVED:
+                // Received ACK for our SYN-ACK
+                peer->state = TCP_ESTABLISHED;
+                printk("  [TCP] Connection established (server side)\n");
+                break;
+
+            case TCP_FIN_WAIT_1:
+                // Received ACK for our FIN
+                peer->state = TCP_FIN_WAIT_2;
+                printk("  [TCP] FIN acknowledged, waiting for remote FIN\n");
+                break;
+
+            case TCP_CLOSING:
+                // Received ACK for our FIN after receiving remote FIN
+                peer->state = TCP_TIME_WAIT;
+                peer->timeout_time_us = timer_get_usec() + TIME_WAIT_DURATION_US;
+                printk("  [TCP] Entering TIME_WAIT state\n");
+                break;
+
+            case TCP_LAST_ACK:
+                // Received ACK for our FIN (after we received remote FIN and closed)
+                peer->state = TCP_CLOSED;
+                printk("  [TCP] Connection closed\n");
+                break;
+
+            default:
+                // Normal data ACK
+                break;
         }
     }
 
-    /* Only send regular data if connection is established */
-    if (peer->state == TCP_ESTABLISHED) {
-        /* Try to push any pending data from the bytestream to the network */
-        if (bs_bytes_available(&peer->sender.reader)) {
-            sender_push(&peer->sender);
-        }
-    }
+    // Process sender part with receiver
+    if (segment->has_sender_segment) {
+        receiver_segment_t *recv_response = NULL;
 
-    /* Send FIN if needed */
-    if (should_send_fin) {
-        tcp_send_fin(peer);
+        // SYN processing for connection establishment
+        if (segment->sender_segment.is_syn) {
+            switch (peer->state) {
+                case TCP_LISTEN:
+                    // Server received SYN from client
+                    printk("  [TCP] Received SYN, sending SYN-ACK\n");
+
+                    // Process with receiver
+                    recv_response =
+                        receiver_process_segment(&peer->receiver, &segment->sender_segment);
+
+                    if (recv_response) {
+                        // Create SYN-ACK response
+                        tcp_segment_t syn_ack = {0};
+                        syn_ack.has_receiver_segment = true;
+                        syn_ack.receiver_segment = *recv_response;
+
+                        // Add SYN to the response
+                        syn_ack.has_sender_segment = true;
+                        syn_ack.sender_segment.seqno = 0;  // Initial sequence number
+                        syn_ack.sender_segment.is_syn = true;
+                        syn_ack.sender_segment.is_fin = false;
+                        syn_ack.sender_segment.len = 0;
+
+                        // Send SYN-ACK
+                        tcp_send_segment(peer, &syn_ack, true);
+
+                        // Update state
+                        peer->state = TCP_SYN_RECEIVED;
+                    }
+                    break;
+
+                case TCP_SYN_SENT:
+                    // Client received SYN from server (simultaneous open)
+                    printk("  [TCP] Simultaneous open, received SYN while in SYN_SENT\n");
+
+                    // Process with receiver
+                    recv_response =
+                        receiver_process_segment(&peer->receiver, &segment->sender_segment);
+
+                    if (recv_response) {
+                        // Send ACK for the SYN
+                        tcp_segment_t ack_response = {0};
+                        ack_response.has_receiver_segment = true;
+                        ack_response.receiver_segment = *recv_response;
+
+                        // Send ACK
+                        tcp_send_segment(peer, &ack_response, false);
+                    }
+                    break;
+
+                default:
+                    // Duplicate SYN or invalid state
+                    recv_response =
+                        receiver_process_segment(&peer->receiver, &segment->sender_segment);
+
+                    if (recv_response) {
+                        // Just send ACK
+                        tcp_segment_t ack_response = {0};
+                        ack_response.has_receiver_segment = true;
+                        ack_response.receiver_segment = *recv_response;
+
+                        // Send ACK
+                        tcp_send_segment(peer, &ack_response, false);
+                    }
+                    break;
+            }
+        }
+        // FIN processing for connection termination
+        else if (segment->sender_segment.is_fin) {
+            printk("  [TCP] Received FIN\n");
+
+            // Process with receiver
+            recv_response = receiver_process_segment(&peer->receiver, &segment->sender_segment);
+
+            if (recv_response) {
+                // Send ACK for the FIN
+                tcp_segment_t ack_response = {0};
+                ack_response.has_receiver_segment = true;
+                ack_response.receiver_segment = *recv_response;
+
+                // Send ACK
+                tcp_send_segment(peer, &ack_response, false);
+
+                // Update state based on current state
+                switch (peer->state) {
+                    case TCP_ESTABLISHED:
+                        // Remote initiated close
+                        peer->state = TCP_CLOSE_WAIT;
+                        printk("  [TCP] Remote closed, in CLOSE_WAIT state\n");
+                        break;
+
+                    case TCP_FIN_WAIT_1:
+                        // We sent FIN, received FIN before our FIN was ACKed
+                        peer->state = TCP_CLOSING;
+                        printk("  [TCP] Simultaneous close, in CLOSING state\n");
+                        break;
+
+                    case TCP_FIN_WAIT_2:
+                        // We sent FIN and it was ACKed, now remote sent FIN
+                        peer->state = TCP_TIME_WAIT;
+                        peer->timeout_time_us = timer_get_usec() + TIME_WAIT_DURATION_US;
+                        printk("  [TCP] Received FIN after our FIN was ACKed, in TIME_WAIT\n");
+                        break;
+
+                    default:
+                        // Invalid state for FIN
+                        printk("  [TCP] Received FIN in invalid state %d\n", peer->state);
+                        break;
+                }
+            }
+        }
+        // Regular data segment processing
+        else {
+            // Process with receiver
+            recv_response = receiver_process_segment(&peer->receiver, &segment->sender_segment);
+
+            if (recv_response) {
+                // Check if we can piggyback data on the ACK
+                sender_segment_t *new_data = sender_generate_segment(&peer->sender);
+
+                if (new_data) {
+                    // Send ACK with piggyback data
+                    tcp_segment_t data_ack = {0};
+                    data_ack.has_receiver_segment = true;
+                    data_ack.receiver_segment = *recv_response;
+                    data_ack.has_sender_segment = true;
+                    data_ack.sender_segment = *new_data;
+
+                    // Send combined segment
+                    tcp_send_segment(peer, &data_ack, true);
+                } else {
+                    // Send pure ACK
+                    tcp_segment_t ack_response = {0};
+                    ack_response.has_receiver_segment = true;
+                    ack_response.receiver_segment = *recv_response;
+
+                    // Send ACK
+                    tcp_send_segment(peer, &ack_response, false);
+                }
+            }
+        }
     }
 }
 
 /**
- * Check for timeouts and handle retransmissions
+ * Check for segments that need retransmission
  *
- * @param peer The TCP peer to process
+ * @param peer The TCP peer to check
+ * @param current_time_us Current time in microseconds
  */
-static inline void tcp_check_timeouts(tcp_peer_t *peer) {
+static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time_us) {
     assert(peer);
 
-    /* Check if any segments need to be retransmitted */
-    sender_check_retransmits(&peer->sender);
+    if (tcp_rtx_empty(&peer->rtx_queue)) {
+        return;
+    }
 
-    /* Handle connection establishment timeout */
-    if ((peer->state == TCP_SYN_SENT || peer->state == TCP_SYN_RECEIVED) &&
-        timer_get_usec() > peer->time_of_last_receipt + 3 * peer->sender.initial_RTO_us) {
-        /* Retry handshake if too much time has passed */
-        if (peer->state == TCP_SYN_SENT) {
-            tcp_send_syn(peer);
+    // Check the oldest unacknowledged segment
+    unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
+    uint32_t rto = peer->initial_RTO_us * (1 << rtx_seg->retransmit_count);
+
+    // If it's time to retransmit
+    if (current_time_us >= rtx_seg->time_sent + rto) {
+        printk("  [TCP] Retransmitting segment (retry %u)\n", rtx_seg->retransmit_count + 1);
+
+        // Update retransmission count and time
+        rtx_seg->retransmit_count++;
+        rtx_seg->time_sent = current_time_us;
+
+        // Send the segment again
+        tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
+    }
+}
+
+/**
+ * Try to generate and send new data
+ *
+ * @param peer The TCP peer to check
+ */
+static inline void tcp_send_new_data(tcp_peer_t *peer) {
+    assert(peer);
+
+    // Only send if in established state or closing
+    if (peer->state != TCP_ESTABLISHED && peer->state != TCP_CLOSE_WAIT &&
+        peer->state != TCP_FIN_WAIT_1) {
+        return;
+    }
+
+    // Try to generate a new segment
+    sender_segment_t *new_segment = sender_generate_segment(&peer->sender);
+
+    if (new_segment) {
+        // Create a TCP segment with the new data
+        tcp_segment_t data_segment = {0};
+        data_segment.has_sender_segment = true;
+        data_segment.sender_segment = *new_segment;
+
+        // If the app closed during FIN_WAIT_1, add an ACK to the FIN
+        if (new_segment->is_fin && peer->state == TCP_CLOSE_WAIT) {
+            peer->state = TCP_LAST_ACK;
+            printk("  [TCP] Sending FIN, entering LAST_ACK state\n");
+        } else if (new_segment->is_fin && peer->state == TCP_ESTABLISHED) {
+            peer->state = TCP_FIN_WAIT_1;
+            printk("  [TCP] Sending FIN, entering FIN_WAIT_1 state\n");
         }
-        /* For SYN_RECEIVED, retransmission is handled by sender_check_retransmits */
+
+        // Send the segment
+        tcp_send_segment(peer, &data_segment, true);
     }
 }
 
@@ -679,10 +679,119 @@ static inline void tcp_check_timeouts(tcp_peer_t *peer) {
 static inline void tcp_tick(tcp_peer_t *peer) {
     assert(peer);
 
-    tcp_check_incoming(peer);
-    tcp_send_pending(peer);
-    tcp_check_timeouts(peer);
+    uint32_t current_time = timer_get_usec();
+
+    // Check for incoming packets
+    uint8_t buffer[RCP_TOTAL_SIZE];
+    int ret = nrf_read_exact_timeout(peer->nrf, buffer, RCP_TOTAL_SIZE, 1000);
+
+    printk(" [NRF] Received packet at nrf: %x\n", peer->nrf->rxaddr);
+
+    if (ret > 0) {
+        // Parse the datagram
+        rcp_datagram_t datagram = rcp_datagram_init();
+        if (!rcp_datagram_parse(&datagram, buffer, ret)) {
+            printk(" [RCP] Failed to parse datagram\n");
+            return;
+        }
+
+        if (!rcp_datagram_verify_checksum(&datagram)) {
+            printk(" [RCP] Checksum verification failed\n");
+            return;
+        }
+
+        // Convert to TCP segment
+        tcp_segment_t segment = rcp_to_tcp_segment(&datagram);
+
+        // Process the segment
+        tcp_process_segment(peer, &segment);
+    }
+
+    // Check if TIME_WAIT timer has expired
+    if (peer->state == TCP_TIME_WAIT && current_time >= peer->timeout_time_us) {
+        peer->state = TCP_CLOSED;
+        printk("  [TCP] TIME_WAIT expired, connection closed\n");
+    }
+
+    // Check for retransmissions
+    tcp_check_retransmits(peer, current_time);
+
+    // Try to send new data
+    tcp_send_new_data(peer);
 }
+
+/********* CONNECTION MANAGEMENT *********/
+
+/**
+ * Actively open a connection (client side) by sending a SYN
+ *
+ * @param peer The TCP peer to connect
+ * @return True if successful, false otherwise
+ */
+static inline bool tcp_connect(tcp_peer_t *peer) {
+    assert(peer);
+
+    if (peer->state != TCP_CLOSED) {
+        return false;
+    }
+
+    // Create SYN segment
+    tcp_segment_t syn_segment = {0};
+    syn_segment.has_sender_segment = true;
+    syn_segment.sender_segment.seqno = 0;  // Initial sequence number
+    syn_segment.sender_segment.is_syn = true;
+    syn_segment.sender_segment.is_fin = false;
+    syn_segment.sender_segment.len = 0;
+
+    // Send SYN
+    tcp_send_segment(peer, &syn_segment, true);
+
+    // Update state
+    peer->state = TCP_SYN_SENT;
+    printk("  [TCP] Sent SYN, entering SYN_SENT state\n");
+
+    return true;
+}
+
+/**
+ * App can call this to close the TCP connection
+ *
+ * @param peer The TCP peer to close
+ */
+static inline void tcp_close(tcp_peer_t *peer) {
+    assert(peer);
+
+    switch (peer->state) {
+        case TCP_ESTABLISHED:
+            // Mark the sender's bytestream as finished
+            bs_end_input(&peer->sender.reader);
+
+            // Try to generate and send a FIN segment immediately
+            tcp_send_new_data(peer);
+            break;
+
+        case TCP_CLOSE_WAIT:
+            // Remote side already closed, we need to close our side
+            bs_end_input(&peer->sender.reader);
+
+            // Try to generate and send a FIN segment immediately
+            tcp_send_new_data(peer);
+            break;
+
+        case TCP_SYN_SENT:
+        case TCP_SYN_RECEIVED:
+            // Abort connection attempt
+            peer->state = TCP_CLOSED;
+            printk("  [TCP] Connection attempt aborted\n");
+            break;
+
+        default:
+            // No action needed in other states
+            break;
+    }
+}
+
+/********* DATA TRANSFER *********/
 
 /**
  * Write data to the TCP connection for sending
@@ -696,13 +805,18 @@ static inline size_t tcp_write(tcp_peer_t *peer, const uint8_t *data, size_t len
     assert(peer);
     assert(data || len == 0);
 
-    /* Only allow writing if connection is established */
-    if (peer->state != TCP_ESTABLISHED) {
+    // Only allow writing if connection is established
+    if (peer->state != TCP_ESTABLISHED && peer->state != TCP_CLOSE_WAIT) {
         return 0;
     }
 
-    /* Write to the bytestream that the sender reads from */
-    return bs_write(&peer->sender.reader, data, len);
+    // Write to the bytestream that the sender reads from
+    size_t bytes_written = bs_write(&peer->sender.reader, data, len);
+
+    // Try to send data immediately
+    tcp_send_new_data(peer);
+
+    return bytes_written;
 }
 
 /**
@@ -717,13 +831,7 @@ static inline size_t tcp_read(tcp_peer_t *peer, uint8_t *data, size_t len) {
     assert(peer);
     assert(data || len == 0);
 
-    /* Only allow reading if connection is established or closing */
-    if (peer->state != TCP_ESTABLISHED && peer->state != TCP_CLOSE_WAIT &&
-        peer->state != TCP_FIN_WAIT_1 && peer->state != TCP_FIN_WAIT_2) {
-        return 0;
-    }
-
-    /* Read from the bytestream that the receiver writes to */
+    // Read from the bytestream that the receiver writes to
     return bs_read(&peer->receiver.writer, data, len);
 }
 
@@ -736,79 +844,8 @@ static inline size_t tcp_read(tcp_peer_t *peer, uint8_t *data, size_t len) {
 static inline bool tcp_has_data(tcp_peer_t *peer) {
     assert(peer);
 
-    /* Check if the receiver's bytestream has data available to read */
+    // Check if the receiver's bytestream has data available to read
     return bs_bytes_available(&peer->receiver.writer) > 0;
-}
-
-/**
- * App can call this to close the TCP connection
- *
- * @param peer The TCP peer to close
- */
-static inline void tcp_close(tcp_peer_t *peer) {
-    assert(peer);
-
-    /* Only proceed with closing if in an appropriate state */
-    if (peer->state == TCP_ESTABLISHED || peer->state == TCP_CLOSE_WAIT) {
-        /* Mark the sender's bytestream as finished */
-        bs_end_input(&peer->sender.reader);
-
-        /* Update state */
-        if (peer->state == TCP_ESTABLISHED) {
-            peer->state = TCP_FIN_WAIT_1;
-
-            /* Immediately send a FIN if no data is pending */
-            if (!bs_bytes_available(&peer->sender.reader)) {
-                tcp_send_fin(peer);
-            }
-            /* Otherwise, FIN will be sent after data in tcp_send_pending */
-        } else if (peer->state == TCP_CLOSE_WAIT) {
-            peer->state = TCP_LAST_ACK;
-
-            /* Always send FIN immediately in LAST_ACK state */
-            tcp_send_fin(peer);
-        }
-    } else if (peer->state == TCP_SYN_SENT || peer->state == TCP_SYN_RECEIVED) {
-        /* Abort connection attempt */
-        peer->state = TCP_CLOSED;
-    }
-}
-
-/**
- * Check if the TCP connection is active
- *
- * @param peer The TCP peer to check
- * @return True if the connection is still active
- */
-static inline bool tcp_is_active(tcp_peer_t *peer) {
-    assert(peer);
-
-    uint32_t now = timer_get_usec();
-
-    /* Connection is active if not in CLOSED or TIME_WAIT state that has expired */
-    if (peer->state == TCP_CLOSED) {
-        return false;
-    }
-
-    /* Check if the TIME_WAIT state has expired */
-    uint32_t expire_time = peer->time_of_last_receipt + 2 * peer->sender.initial_RTO_us;
-    if (peer->state == TCP_TIME_WAIT && now >= expire_time) {
-        peer->state = TCP_CLOSED;
-        return false;
-    }
-
-    /* Sender is active if it has pending segments or is still reading from the app */
-    bool sender_active =
-        !rtq_empty(&peer->sender.pending_segs) || !bs_reader_finished(&peer->sender.reader);
-
-    /* Receiver is active if it is still writing to the app */
-    bool receiver_active = !bs_writer_finished(&peer->receiver.writer);
-
-    /* We should linger for 10 RTOs after the last packet was received */
-    bool lingering = peer->linger_after_streams_finish &&
-                     (now < peer->time_of_last_receipt + 10 * peer->sender.initial_RTO_us);
-
-    return (sender_active || receiver_active || lingering);
 }
 
 /**
@@ -820,7 +857,7 @@ static inline bool tcp_is_active(tcp_peer_t *peer) {
 static inline bool tcp_receive_closed(tcp_peer_t *peer) {
     assert(peer);
 
-    /* Check if the receiver's bytestream is finished */
+    // Check if the receiver's bytestream is finished
     return bs_writer_finished(&peer->receiver.writer);
 }
 
@@ -834,4 +871,50 @@ static inline bool tcp_is_established(tcp_peer_t *peer) {
     assert(peer);
 
     return peer->state == TCP_ESTABLISHED;
+}
+
+/**
+ * Check if the TCP connection is active
+ *
+ * @param peer The TCP peer to check
+ * @return True if the connection is still active
+ */
+static inline bool tcp_is_active(tcp_peer_t *peer) {
+    assert(peer);
+
+    // Connection is closed
+    if (peer->state == TCP_CLOSED) {
+        return false;
+    }
+
+    // Check streams status
+    bool sender_active =
+        !bs_reader_finished(&peer->sender.reader) || !tcp_rtx_empty(&peer->rtx_queue);
+    bool receiver_active = !bs_writer_finished(&peer->receiver.writer);
+
+    // If in TIME_WAIT state, check timer
+    if (peer->state == TCP_TIME_WAIT) {
+        return timer_get_usec() < peer->timeout_time_us;
+    }
+
+    // Check if we should linger
+    uint32_t now = timer_get_usec();
+    bool lingering = peer->linger_after_streams_finish &&
+                     (now < peer->time_of_last_receipt + 10 * peer->initial_RTO_us);
+
+    return sender_active || receiver_active || lingering;
+}
+
+/**
+ * Clean up a TCP connection and free resources
+ *
+ * @param peer The TCP peer to clean up
+ */
+static inline void tcp_cleanup(tcp_peer_t *peer) {
+    assert(peer);
+
+    // Clean up the retransmission queue
+    while (!tcp_rtx_empty(&peer->rtx_queue)) {
+        unacked_tcp_segment_t *seg = tcp_rtx_pop(&peer->rtx_queue);
+    }
 }

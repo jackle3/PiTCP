@@ -1,7 +1,8 @@
 #pragma once
 
-#include "rcp-datagram.h"
 #include <stdbool.h>
+
+#include "rcp-datagram.h"
 
 typedef struct receiver_segment {
     uint16_t ackno;        // Sequence number of the ACK
@@ -16,3 +17,10 @@ typedef struct sender_segment {
     size_t len;   // Length of the payload
     uint8_t payload[RCP_MAX_PAYLOAD];
 } sender_segment_t;
+
+typedef struct tcp_segment {
+    sender_segment_t sender_segment;
+    receiver_segment_t receiver_segment;
+    bool has_sender_segment;    // Whether this segment contains sender data
+    bool has_receiver_segment;  // Whether this segment contains receiver data
+} tcp_segment_t;

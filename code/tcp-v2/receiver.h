@@ -1,83 +1,35 @@
 #pragma once
 
 #include "bytestream.h"
-#include "nrf.h"
-#include "router.h"
 #include "types.h"
 
 /********* TYPES *********/
 
 /* Receiver state structure */
 typedef struct receiver {
-    nrf_t *nrf;          /* NRF interface for sending replies (ACKs/window updates) */
-    bytestream_t writer; /* Receiver writes to it, app reads from it */
-
-    uint8_t local_addr;  /* Local RCP address */
-    uint8_t remote_addr; /* Remote RCP address */
-
+    bytestream_t writer;                 /* Receiver writes to it, app reads from it */
+    uint8_t local_addr;                  /* Local RCP address */
+    uint8_t remote_addr;                 /* Remote RCP address */
     char reasm_buffer[MAX_WINDOW_SIZE];  /* Buffer for reassembled data */
     bool reasm_bitmask[MAX_WINDOW_SIZE]; /* Bitmask to track received segments */
-
-    uint32_t total_size;  /* Total bytes received */
-    uint32_t next_seqno;  /* Next expected sequence number */
-    uint16_t window_size; /* Advertised window size */
-    bool syn_received;    /* Whether a SYN has been received */
-    bool fin_received;    /* Whether a FIN has been received */
+    uint32_t total_size;                 /* Total bytes received */
+    uint32_t next_seqno;                 /* Next expected sequence number */
+    uint16_t window_size;                /* Advertised window size */
+    bool syn_received;                   /* Whether a SYN has been received */
+    bool fin_received;                   /* Whether a FIN has been received */
 } receiver_t;
-
-/********* HELPER FUNCTIONS *********/
-
-/**
- * Convert a receiver segment to an RCP datagram
- *
- * @param receiver Pointer to the receiver containing addressing information
- * @param segment Pointer to the receiver segment to convert
- * @return An RCP datagram containing the converted data
- */
-rcp_datagram_t receiver_segment_to_rcp(receiver_t *receiver, receiver_segment_t *segment) {
-    assert(receiver);
-    assert(segment);
-
-    rcp_datagram_t datagram = rcp_datagram_init();
-
-    /* Set the source and destination addresses */
-    datagram.header.src = receiver->local_addr;
-    datagram.header.dst = receiver->remote_addr;
-
-    /* Set the ACK flag if needed */
-    if (segment->is_ack) {
-        rcp_set_flag(&datagram.header, RCP_FLAG_ACK);
-    }
-
-    /* Set the acknowledgment number */
-    datagram.header.ackno = segment->ackno;
-
-    /* Set the window size */
-    datagram.header.window = segment->window_size;
-
-    /* Zero out the unused fields (for the sending message) */
-    datagram.header.seqno = 0;
-    datagram.payload_len = 0;
-
-    /* Compute the checksum over header only (no payload) */
-    rcp_datagram_compute_checksum(&datagram);
-
-    return datagram;
-}
 
 /********* RECEIVER *********/
 
 /**
  * Initialize the receiver with default state
  *
- * @param nrf The NRF interface for receiving data
  * @param local_addr Local RCP address
  * @param remote_addr Remote RCP address
  * @return Initialized receiver structure
  */
-receiver_t receiver_init(nrf_t *nrf, uint8_t local_addr, uint8_t remote_addr) {
+static inline receiver_t receiver_init(uint8_t local_addr, uint8_t remote_addr) {
     receiver_t receiver = {
-        .nrf = nrf,
         .writer = bs_init(),
         .reasm_buffer = {0},
         .reasm_bitmask = {0},
@@ -101,7 +53,8 @@ receiver_t receiver_init(nrf_t *nrf, uint8_t local_addr, uint8_t remote_addr) {
  * @param len The length of the data to insert
  * @param is_last Whether the segment is the last segment (FIN)
  */
-void reasm_insert(receiver_t *receiver, size_t first_idx, char *data, size_t len, bool is_last) {
+static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *data, size_t len,
+                                bool is_last) {
     assert(receiver);
     assert(data);
 
@@ -180,7 +133,7 @@ void reasm_insert(receiver_t *receiver, size_t first_idx, char *data, size_t len
  * @param receiver The receiver to check
  * @return The number of bytes pending in the reassembler
  */
-uint16_t reasm_bytes_pending(receiver_t *receiver) {
+static inline uint16_t reasm_bytes_pending(receiver_t *receiver) {
     assert(receiver);
 
     uint16_t bytes_pending = 0;
@@ -193,43 +146,19 @@ uint16_t reasm_bytes_pending(receiver_t *receiver) {
 }
 
 /**
- * Callback function for transmitting ACK replies
- *
- * @param receiver The receiver that will transmit the reply
- * @param segment The reply to transmit
- */
-void transmit_reply(receiver_t *receiver, receiver_segment_t *segment) {
-    assert(receiver);
-    assert(segment);
-
-    /* We always use the receiver's NRF to send messages out */
-    nrf_t *sender_nrf = receiver->nrf;
-
-    /* Get the next hop NRF address from the routing table */
-    uint8_t src_rcp = receiver->local_addr;
-    uint8_t dst_rcp = receiver->remote_addr;
-    uint32_t next_hop_nrf = rtable_map[src_rcp][dst_rcp];
-
-    /* Convert the receiver_segment_t to a rcp_datagram_t */
-    rcp_datagram_t datagram = receiver_segment_to_rcp(receiver, segment);
-
-    /* Serialize the datagram */
-    uint8_t buffer[RCP_TOTAL_SIZE];
-    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
-
-    /* Send the reply to the next hop NRF address */
-    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
-}
-
-/**
- * Process a segment from the sender
+ * Process a segment from the sender and generate an ACK response if needed
  *
  * @param receiver The receiver to process the segment
  * @param segment The segment to process
+ * @return A pointer to the response segment if an ACK is needed, NULL otherwise
  */
-void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
+static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
+                                                           sender_segment_t *segment) {
     assert(receiver);
     assert(segment);
+
+    static receiver_segment_t ack_response = {0};
+    bool send_ack = false;
 
     // Handle SYN flag - important for three-way handshake
     if (segment->is_syn) {
@@ -240,36 +169,30 @@ void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
             // Don't need to process data for a pure SYN (it has no payload)
             if (segment->len == 0) {
                 // Send an ACK for the SYN
-                receiver_segment_t ack = {
-                    .ackno = receiver->next_seqno,
-                    .is_ack = true,
-                    .window_size = bs_remaining_capacity(&receiver->writer),
-                };
+                ack_response.ackno = receiver->next_seqno;
+                ack_response.is_ack = true;
+                ack_response.window_size = bs_remaining_capacity(&receiver->writer);
 
-                printk("  [RECV] Sending ACK for SYN with ackno %u and window size %u\n", ack.ackno,
-                       ack.window_size);
+                printk("  [RECV] Sending ACK for SYN with ackno %u and window size %u\n",
+                       ack_response.ackno, ack_response.window_size);
 
-                transmit_reply(receiver, &ack);
-                return;
+                return &ack_response;
             }
             // If SYN has payload, continue processing below
         } else if (segment->seqno < receiver->next_seqno - 1) {
             // This is a duplicate SYN, just ACK what we've received so far
-            receiver_segment_t ack = {
-                .ackno = receiver->next_seqno,
-                .is_ack = true,
-                .window_size = bs_remaining_capacity(&receiver->writer),
-            };
+            ack_response.ackno = receiver->next_seqno;
+            ack_response.is_ack = true;
+            ack_response.window_size = bs_remaining_capacity(&receiver->writer);
 
-            printk("  [RECV] Duplicate SYN, sending ACK with ackno %u\n", ack.ackno);
-            transmit_reply(receiver, &ack);
-            return;
+            printk("  [RECV] Duplicate SYN, sending ACK with ackno %u\n", ack_response.ackno);
+            return &ack_response;
         }
     } else if (!receiver->syn_received) {
         // Ignore segments before SYN is received
         printk("  [RECV] Missing SYN, ignoring segment %u to %u with length %u\n", segment->seqno,
                segment->seqno + segment->len, segment->len);
-        return;
+        return NULL;
     }
 
     // Check if this segment is in sequence
@@ -283,15 +206,12 @@ void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
         // If this segment is completely duplicate, just ACK what we've received
         if (segment->seqno + segment->len <= receiver->next_seqno) {
             // Send acknowledgment for the data we've already received
-            receiver_segment_t ack = {
-                .ackno = receiver->next_seqno,
-                .is_ack = true,
-                .window_size = bs_remaining_capacity(&receiver->writer),
-            };
+            ack_response.ackno = receiver->next_seqno;
+            ack_response.is_ack = true;
+            ack_response.window_size = bs_remaining_capacity(&receiver->writer);
 
-            printk("  [RECV] Duplicate segment, sending ACK with ackno %u\n", ack.ackno);
-            transmit_reply(receiver, &ack);
-            return;
+            printk("  [RECV] Duplicate segment, sending ACK with ackno %u\n", ack_response.ackno);
+            return &ack_response;
         }
 
         // If it's partially overlapping, only process the new part
@@ -302,6 +222,8 @@ void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
         reasm_insert(receiver,
                      new_start - 1,  // Subtract 1 to account for the SYN
                      segment->payload + (new_start - segment->seqno), new_size, segment->is_fin);
+
+        send_ack = true;
     } else if (segment->seqno == receiver->next_seqno) {
         // This segment is the next one we're expecting - perfect!
 
@@ -317,6 +239,8 @@ void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
         if (segment->is_fin) {
             receiver->next_seqno++;
         }
+
+        send_ack = true;
     } else {
         // This segment has a gap - we're missing some data
         // We'll still buffer it in the reassembler if possible
@@ -325,25 +249,26 @@ void recv_process_segment(receiver_t *receiver, sender_segment_t *segment) {
         reasm_insert(receiver,
                      segment->seqno - 1,  // Subtract 1 to account for the SYN
                      segment->payload, segment->len, segment->is_fin);
+
+        send_ack = true;
     }
 
-    // Calculate ackno and window size for the ACK
-    // Add 1 to ackno if FIN has been processed
-    uint16_t fin_offset = receiver->fin_received ? 1 : 0;
+    // Generate ACK if needed
+    if (send_ack) {
+        // Update advertised window size
+        uint32_t window_size = bs_remaining_capacity(&receiver->writer);
+        receiver->window_size = MIN(window_size, MAX_WINDOW_SIZE);
 
-    // Update advertised window size
-    uint32_t window_size = bs_remaining_capacity(&receiver->writer);
-    receiver->window_size = MIN(window_size, MAX_WINDOW_SIZE);
+        // Send an ACK for all processed data
+        ack_response.ackno = receiver->next_seqno;
+        ack_response.is_ack = true;
+        ack_response.window_size = receiver->window_size;
 
-    // Send an ACK for all processed data
-    receiver_segment_t ack = {
-        .ackno = receiver->next_seqno,
-        .is_ack = true,
-        .window_size = receiver->window_size,
-    };
+        printk("  [RECV] Sending ACK for segment with ackno %u and window size %u\n",
+               ack_response.ackno, ack_response.window_size);
 
-    printk("  [RECV] Sending ACK for segment with ackno %u and window size %u\n", ack.ackno,
-           ack.window_size);
+        return &ack_response;
+    }
 
-    transmit_reply(receiver, &ack);
+    return NULL;
 }
