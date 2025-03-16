@@ -92,7 +92,7 @@ static inline uint8_t rcp_calculate_checksum(const rcp_header_t *hdr, const uint
     temp_hdr.cksum = 0;
 
     // Use 16-bit one's complement sum
-    uint16_t sum = 0;
+    size_t sum = 0;
     const uint8_t *data = (const uint8_t *)&temp_hdr;
 
     // Sum header bytes as 16-bit words

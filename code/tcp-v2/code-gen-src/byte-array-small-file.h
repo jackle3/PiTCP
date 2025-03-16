@@ -11513,4 +11513,4 @@ static const uint8_t binary_data[] = {
 };
 
 // Size of the binary data
-static const size_t binary_length = 92079;
+static const size_t binary_length = 50000;
