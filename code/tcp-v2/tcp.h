@@ -326,22 +326,23 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
             // Add to the end of the queue
             memcpy(&rtx_segment->segment, segment, sizeof(tcp_segment_t));
 
-            printk("  [TCP %x] Adding segment to retransmission queue: ", peer->sender.local_addr);
+            VERBOSE_PRINT("  [TCP %x] Adding segment to retransmission queue: ",
+                          peer->sender.local_addr);
             if (rtx_segment->segment.has_sender_segment) {
-                printk("seqno=%u ", rtx_segment->segment.sender_segment.seqno);
+                VERBOSE_PRINT("seqno=%u ", rtx_segment->segment.sender_segment.seqno);
                 if (rtx_segment->segment.sender_segment.is_syn)
-                    printk("syn=1 ");
+                    VERBOSE_PRINT("syn=1 ");
                 if (rtx_segment->segment.sender_segment.is_fin)
-                    printk("fin=1 ");
-                printk("len=%u ", rtx_segment->segment.sender_segment.len);
+                    VERBOSE_PRINT("fin=1 ");
+                VERBOSE_PRINT("len=%u ", rtx_segment->segment.sender_segment.len);
             }
             if (rtx_segment->segment.has_receiver_segment) {
-                printk("ackno=%u ", rtx_segment->segment.receiver_segment.ackno);
+                VERBOSE_PRINT("ackno=%u ", rtx_segment->segment.receiver_segment.ackno);
                 if (rtx_segment->segment.receiver_segment.is_ack)
-                    printk("ack=1 ");
-                printk("window=%u ", rtx_segment->segment.receiver_segment.window_size);
+                    VERBOSE_PRINT("ack=1 ");
+                VERBOSE_PRINT("window=%u ", rtx_segment->segment.receiver_segment.window_size);
             }
-            printk("\n");
+            VERBOSE_PRINT("\n");
 
             tcp_rtx_append(&peer->rtx_queue, rtx_segment);
             peer->segs_in_flight++;

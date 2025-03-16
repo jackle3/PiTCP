@@ -23,8 +23,7 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /* Buffer capacity constants */
-#define MAX_WINDOW_SIZE 1024
-#define BS_CAPACITY MAX_WINDOW_SIZE
+#define BS_CAPACITY 1024
 
 /**
  * Bytestream structure - circular buffer implementation
