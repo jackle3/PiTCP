@@ -59,7 +59,7 @@ static inline const char *tcp_state_to_string(tcp_state_t state) {
 }
 
 /* Callback function type for sending TCP segments */
-typedef void (*tcp_send_callback_t)(void *ctx, uint8_t src, uint8_t dst, const void *data,
+typedef void (*tcp_send_callback_t)(nrf_t *nrf, uint8_t src, uint8_t dst, const void *data,
                                     size_t len);
 
 /* Unacknowledged TCP segment for retransmission */
@@ -85,7 +85,6 @@ typedef struct tcp_peer {
 
     nrf_t *nrf;                        /* NRF interface for sending/receiving */
     tcp_send_callback_t send_callback; /* Callback for sending segments */
-    void *callback_ctx;                /* Context for the callback */
 
     tcp_state_t state;                /* Current TCP connection state */
     tcp_rtx_queue_t rtx_queue;        /* Queue of segments that need acknowledgment */
@@ -193,29 +192,23 @@ static inline rcp_datagram_t tcp_segment_to_rcp(tcp_segment_t *segment, uint8_t 
 /**
  * Default implementation of the send callback using NRF
  *
- * @param ctx Callback context (expected to be a tcp_peer_t pointer)
+ * @param nrf The NRF interface for sending/receiving
  * @param src Source RCP address
  * @param dst Destination RCP address
  * @param data Data to send
  * @param len Length of data to send
  */
-static inline void tcp_default_send_callback(void *ctx, uint8_t src, uint8_t dst, const void *data,
+static inline void tcp_default_send_callback(nrf_t *nrf, uint8_t src, uint8_t dst, const void *data,
                                              size_t len) {
-    tcp_peer_t *peer = (tcp_peer_t *)ctx;
-    assert(peer);
-    printk("  [CALLBACK] peer_local: %u, peer_remote: %u, peer_local_nrf: %x, src: %u, dst: %u\n",
-           peer->sender.local_addr, peer->sender.remote_addr, peer->nrf->rxaddr, src, dst);
-    assert(peer->sender.local_addr == src);
-    assert(peer->sender.remote_addr == dst);
-
+    assert(nrf);
     // Get the next hop NRF address from the routing table
     uint32_t next_hop_nrf = rtable_map[src][dst];
 
-    printk(" [NRF] Sending data from %u (nrf: %x) to %u (nrf: %x)\n", src, peer->nrf->rxaddr, dst,
+    printk(" [NRF] Sending data from %u (nrf: %x) to %u (nrf: %x)\n", src, nrf->rxaddr, dst,
            next_hop_nrf);
 
     // Send the data via NRF
-    nrf_send_noack(peer->nrf, next_hop_nrf, data, len);
+    nrf_send_noack(nrf, next_hop_nrf, data, len);
 }
 
 /********* TCP PEER IMPLEMENTATION *********/
@@ -235,7 +228,6 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t r
                        .receiver = receiver_init(local_addr, remote_addr),
                        .nrf = nrf,
                        .send_callback = tcp_default_send_callback,
-                       .callback_ctx = NULL,  // Will be set to &peer after initialization
                        .state = is_server ? TCP_LISTEN : TCP_CLOSED,
                        .initial_RTO_us = RTO_INITIAL_US,
                        .time_of_last_receipt = timer_get_usec(),
@@ -244,18 +236,6 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t r
 
     // Initialize retransmission queue
     tcp_rtx_init(&peer.rtx_queue);
-
-    // Set self as callback context
-    peer.callback_ctx = &peer;
-
-    // Verify the callback context
-    tcp_peer_t *verify_peer = (tcp_peer_t *)peer.callback_ctx;
-    assert(verify_peer == &peer);
-    assert(verify_peer->sender.local_addr == peer.sender.local_addr);
-    assert(verify_peer->sender.remote_addr == peer.sender.remote_addr);
-    assert(verify_peer->receiver.local_addr == peer.receiver.local_addr);
-    assert(verify_peer->receiver.remote_addr == peer.receiver.remote_addr);
-    assert(verify_peer->state == peer.state);
 
     return peer;
 }
@@ -272,7 +252,6 @@ static inline void tcp_set_send_callback(tcp_peer_t *peer, tcp_send_callback_t c
     assert(peer);
 
     peer->send_callback = callback;
-    peer->callback_ctx = ctx;
 }
 
 /**
@@ -319,8 +298,8 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
 
     // Send the segment using callback
     printk("  [CALLBACK] sending segment\n");
-    peer->send_callback(peer->callback_ctx, peer->sender.local_addr, peer->sender.remote_addr,
-                        buffer, length);
+    peer->send_callback(peer->nrf, peer->sender.local_addr, peer->sender.remote_addr, buffer,
+                        length);
 
     // Add to retransmission queue if needed
     if (needs_ack && segment->has_sender_segment &&
