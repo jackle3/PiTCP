@@ -278,10 +278,14 @@ static inline void tcp_process_fin(tcp_peer_t *peer, sender_segment_t *segment) 
 
     /* Update state based on current state */
     if (peer->state == TCP_ESTABLISHED) {
+        // Remote sent FIN - we are waiting for our app to close and send our FIN
         peer->state = TCP_CLOSE_WAIT;
     } else if (peer->state == TCP_FIN_WAIT_1) {
+        // We sent FIN and received a FIN from remote - both sides initiating close
         peer->state = TCP_CLOSING;
     } else if (peer->state == TCP_FIN_WAIT_2) {
+        // We sent FIN and received an ACK - when we receive remote FIN, we reply
+        // with an ACK and idle in case there are delayed segments in transit
         peer->state = TCP_TIME_WAIT;
     }
 
@@ -752,9 +756,8 @@ static inline bool tcp_is_active(tcp_peer_t *peer) {
 
     /* Check if the TIME_WAIT state has expired */
     uint32_t expire_time = peer->time_of_last_receipt + 2 * peer->sender.initial_RTO_us;
-    printk("  [TCP] TIME_WAIT: current time %u, last receipt %u, RTO %u, expire_time %u\n", now,
-           peer->time_of_last_receipt, peer->sender.initial_RTO_us, expire_time);
     if (peer->state == TCP_TIME_WAIT && now >= expire_time) {
+        peer->state = TCP_CLOSED;
         return false;
     }
 

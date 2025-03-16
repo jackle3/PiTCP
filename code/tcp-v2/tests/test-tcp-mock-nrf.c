@@ -18,7 +18,7 @@ static int mock_nrf_read_exact_timeout(nrf_t *nic, void *msg, unsigned nbytes, u
 #include "tcp.h"
 
 // Test parameters
-#define TEST_ITERATIONS 200
+#define TEST_ITERATIONS 1000
 #define DELAY_MS 5
 
 // Circular buffer for packet exchange between peers
@@ -114,8 +114,9 @@ static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, uns
             bool is_syn = rcp_has_flag(&datagram.header, RCP_FLAG_SYN);
             bool is_ack = rcp_has_flag(&datagram.header, RCP_FLAG_ACK);
             bool is_fin = rcp_has_flag(&datagram.header, RCP_FLAG_FIN);
-            
-            printk("Sending datagram to %x: SYN: %d, ACK: %d, FIN: %d", txaddr, is_syn, is_ack, is_fin);
+
+            printk("Sending datagram to %x: SYN: %d, ACK: %d, FIN: %d", txaddr, is_syn, is_ack,
+                   is_fin);
             if (is_ack) {
                 printk(", ackno: %u", datagram.header.ackno);
             }
@@ -131,7 +132,7 @@ static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, uns
             } else if (is_ack && syn_ack_seen && !ack_seen) {
                 printk("Initial ACK sent from %d\n", mock->id);
                 ack_seen = true;
-            } 
+            }
             // Track connection termination
             else if (is_fin) {
                 if (mock->id == 1) {
@@ -141,13 +142,13 @@ static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, uns
                     printk("FIN sent from server\n");
                     server_fin_seen = true;
                 }
-            } 
+            }
             // Track ACKs for FINs during termination
             else if (is_ack) {
                 // Check if this is a server ACK for client FIN
                 if (mock->id == 2 && client_fin_seen && !server_ack_for_fin) {
-                    // This heuristic assumes the ACK is for the FIN if it comes after client_fin_seen
-                    // A more precise check would compare sequence numbers
+                    // This heuristic assumes the ACK is for the FIN if it comes after
+                    // client_fin_seen A more precise check would compare sequence numbers
                     printk("ACK from server for client's FIN\n");
                     server_ack_for_fin = true;
                 }
@@ -200,20 +201,32 @@ static void run_tcp_ticks(tcp_peer_t *client, tcp_peer_t *server, int count) {
 }
 
 // Helper to print TCP state name
-static const char* tcp_state_name(tcp_state_t state) {
+static const char *tcp_state_name(tcp_state_t state) {
     switch (state) {
-        case TCP_CLOSED: return "CLOSED";
-        case TCP_LISTEN: return "LISTEN";
-        case TCP_SYN_SENT: return "SYN_SENT";
-        case TCP_SYN_RECEIVED: return "SYN_RECEIVED";
-        case TCP_ESTABLISHED: return "ESTABLISHED";
-        case TCP_FIN_WAIT_1: return "FIN_WAIT_1";
-        case TCP_FIN_WAIT_2: return "FIN_WAIT_2";
-        case TCP_CLOSE_WAIT: return "CLOSE_WAIT";
-        case TCP_CLOSING: return "CLOSING";
-        case TCP_LAST_ACK: return "LAST_ACK";
-        case TCP_TIME_WAIT: return "TIME_WAIT";
-        default: return "UNKNOWN";
+        case TCP_CLOSED:
+            return "CLOSED";
+        case TCP_LISTEN:
+            return "LISTEN";
+        case TCP_SYN_SENT:
+            return "SYN_SENT";
+        case TCP_SYN_RECEIVED:
+            return "SYN_RECEIVED";
+        case TCP_ESTABLISHED:
+            return "ESTABLISHED";
+        case TCP_FIN_WAIT_1:
+            return "FIN_WAIT_1";
+        case TCP_FIN_WAIT_2:
+            return "FIN_WAIT_2";
+        case TCP_CLOSE_WAIT:
+            return "CLOSE_WAIT";
+        case TCP_CLOSING:
+            return "CLOSING";
+        case TCP_LAST_ACK:
+            return "LAST_ACK";
+        case TCP_TIME_WAIT:
+            return "TIME_WAIT";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -248,8 +261,8 @@ void test_tcp_handshake_and_data_transfer() {
     tcp_peer_t server = tcp_peer_init((nrf_t *)server_nrf, (nrf_t *)server_nrf, 2, 1, true);
 
     printk("TCP peers initialized\n");
-    printk("Client state: %s, Server state: %s\n", 
-           tcp_state_name(client.state), tcp_state_name(server.state));
+    printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+           tcp_state_name(server.state));
 
     // Step 1: Initiate connection from client to server
     printk("\nStep 1: Initiating connection (SYN, SYN-ACK, ACK handshake)\n");
@@ -264,10 +277,10 @@ void test_tcp_handshake_and_data_transfer() {
         handshake_iterations++;
 
         if (handshake_iterations % 10 == 0) {
-            printk("Handshake progress: SYN: %d, SYN-ACK: %d, ACK: %d (iterations: %d)\n", 
-                   syn_seen, syn_ack_seen, ack_seen, handshake_iterations);
-            printk("Client state: %s, Server state: %s\n", 
-                   tcp_state_name(client.state), tcp_state_name(server.state));
+            printk("Handshake progress: SYN: %d, SYN-ACK: %d, ACK: %d (iterations: %d)\n", syn_seen,
+                   syn_ack_seen, ack_seen, handshake_iterations);
+            printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+                   tcp_state_name(server.state));
         }
     }
 
@@ -279,20 +292,20 @@ void test_tcp_handshake_and_data_transfer() {
     assert(tcp_is_established(&server) && "Server connection not established");
 
     printk("Connection established successfully after %d iterations\n", handshake_iterations);
-    printk("Client state: %s, Server state: %s\n", 
-           tcp_state_name(client.state), tcp_state_name(server.state));
+    printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+           tcp_state_name(server.state));
 
     // Step 2: Send data from client to server
     printk("\nStep 2: Sending data from client to server\n");
 
     // Print out connection state information
-    printk("Client sender state: next_seqno: %u, window_size: %u\n", 
-           client.sender.next_seqno, client.sender.window_size);
+    printk("Client sender state: next_seqno: %u, window_size: %u\n", client.sender.next_seqno,
+           client.sender.window_size);
     printk("Client receiver state: syn_received: %d, next_seqno: %u, window_size: %u\n",
            client.receiver.syn_received, client.receiver.next_seqno, client.receiver.window_size);
 
-    printk("Server sender state: next_seqno: %u, window_size: %u\n", 
-           server.sender.next_seqno, server.sender.window_size);
+    printk("Server sender state: next_seqno: %u, window_size: %u\n", server.sender.next_seqno,
+           server.sender.window_size);
     printk("Server receiver state: syn_received: %d, next_seqno: %u, window_size: %u\n",
            server.receiver.syn_received, server.receiver.next_seqno, server.receiver.window_size);
 
@@ -393,79 +406,77 @@ void test_tcp_handshake_and_data_transfer() {
     // First, client initiates close
     printk("1. Client initiating connection close\n");
     tcp_close(&client);
-    
+
     // Run some ticks to let the client FIN propagate and get ACKed
     int client_close_iterations = 0;
     while ((!client_fin_seen || !server_ack_for_fin) && client_close_iterations < TEST_ITERATIONS) {
         run_tcp_ticks(&client, &server, 1);
         client_close_iterations++;
-        
+
         if (client_close_iterations % 5 == 0) {
             printk("Client close progress: Client FIN: %d, Server ACK: %d (iterations: %d)\n",
                    client_fin_seen, server_ack_for_fin, client_close_iterations);
-            printk("Client state: %s, Server state: %s\n", 
-                   tcp_state_name(client.state), tcp_state_name(server.state));
+            printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+                   tcp_state_name(server.state));
         }
     }
-    
+
     // Verify step 1 and 2 of closing handshake
     assert(client_fin_seen && "Client did not send FIN");
     assert(server_ack_for_fin && "Server did not ACK client's FIN");
-    
+
     // Server should be in CLOSE_WAIT state now
-    printk("Client FIN sent and ACKed. Client state: %s, Server state: %s\n", 
+    printk("Client FIN sent and ACKed. Client state: %s, Server state: %s\n",
            tcp_state_name(client.state), tcp_state_name(server.state));
-    
+
     // Server now initiates its own close
     printk("2. Server closing connection\n");
     tcp_close(&server);
-    
+
     // Run ticks to complete the connection termination
     int server_close_iterations = 0;
     while ((!server_fin_seen || !client_ack_for_fin) && server_close_iterations < TEST_ITERATIONS) {
         run_tcp_ticks(&client, &server, 1);
         server_close_iterations++;
-        
+
         if (server_close_iterations % 5 == 0) {
             printk("Server close progress: Server FIN: %d, Client ACK: %d (iterations: %d)\n",
                    server_fin_seen, client_ack_for_fin, server_close_iterations);
-            printk("Client state: %s, Server state: %s\n", 
-                   tcp_state_name(client.state), tcp_state_name(server.state));
+            printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+                   tcp_state_name(server.state));
         }
     }
-    
+
     // Verify step 3 and 4 of closing handshake
     assert(server_fin_seen && "Server did not send FIN");
     assert(client_ack_for_fin && "Client did not ACK server's FIN");
-    
+
     // Let the connection terminate fully (TIME_WAIT -> CLOSED)
     int termination_iterations = 0;
     bool fully_closed = false;
-    
+
     while (!fully_closed && termination_iterations < TEST_ITERATIONS) {
         run_tcp_ticks(&client, &server, 2);  // More ticks per iteration
         termination_iterations++;
-        
-        // For testing, force disable lingering after a certain time
-        if (termination_iterations > 10) {
-            client.linger_after_streams_finish = false;
-            server.linger_after_streams_finish = false;
-        }
-        
+
         // Check for full termination
         if (!tcp_is_active(&client) && !tcp_is_active(&server)) {
             fully_closed = true;
         }
-        
-        if (termination_iterations % 5 == 0) {
+
+        if (termination_iterations % 20 == 0) {
             printk("Termination progress (iterations: %d)\n", termination_iterations);
-            printk("Client state: %s, Server state: %s\n", 
-                   tcp_state_name(client.state), tcp_state_name(server.state));
-            printk("Client active: %d, Server active: %d\n", 
-                   tcp_is_active(&client), tcp_is_active(&server));
+            uint32_t now = timer_get_usec();
+            uint32_t expire_time = client.time_of_last_receipt + 2 * client.sender.initial_RTO_us;
+            printk("  [TCP] TIME_WAIT: current time %u, last receipt %u, RTO %u, expire_time %u\n",
+                   now, client.time_of_last_receipt, client.sender.initial_RTO_us, expire_time);
+            printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+                   tcp_state_name(server.state));
+            printk("Client active: %d, Server active: %d\n", tcp_is_active(&client),
+                   tcp_is_active(&server));
         }
     }
-    
+
     // Final verification
     assert(!tcp_is_active(&client) && "Client connection still active");
     assert(!tcp_is_active(&server) && "Server connection still active");
@@ -473,8 +484,8 @@ void test_tcp_handshake_and_data_transfer() {
     assert(tcp_receive_closed(&client) && "Client receiving side not closed");
 
     printk("Connection terminated successfully! Four-way handshake completed.\n");
-    printk("Final states - Client: %s, Server: %s\n", 
-           tcp_state_name(client.state), tcp_state_name(server.state));
+    printk("Final states - Client: %s, Server: %s\n", tcp_state_name(client.state),
+           tcp_state_name(server.state));
     printk("=== Test completed successfully! ===\n");
 }
 
