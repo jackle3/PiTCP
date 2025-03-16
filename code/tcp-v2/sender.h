@@ -91,6 +91,70 @@ rcp_datagram_t sender_segment_to_rcp(sender_t *sender, sender_segment_t *segment
     return datagram;
 }
 
+/**
+ * Convert a receiver segment (ACK) to an RCP datagram
+ *
+ * @param sender Pointer to the sender containing addressing information
+ * @param segment Pointer to the receiver segment to convert
+ * @return An RCP datagram containing the converted data
+ */
+rcp_datagram_t receiver_segment_to_rcp_from_sender(sender_t *sender, receiver_segment_t *segment) {
+    assert(sender);
+    assert(segment);
+
+    rcp_datagram_t datagram = rcp_datagram_init();
+
+    /* Set the source and destination addresses */
+    datagram.header.src = sender->local_addr;
+    datagram.header.dst = sender->remote_addr;
+
+    /* Set the ACK flag */
+    rcp_set_flag(&datagram.header, RCP_FLAG_ACK);
+
+    /* Set the acknowledgment number */
+    datagram.header.ackno = segment->ackno;
+
+    /* Set the window size */
+    datagram.header.window = segment->window_size;
+
+    /* Zero out the unused fields */
+    datagram.header.seqno = 0;
+    datagram.header.payload_len = 0;
+
+    /* Compute the checksum over header only (no payload) */
+    rcp_datagram_compute_checksum(&datagram);
+
+    return datagram;
+}
+
+/**
+ * Convert a sender segment with ACK to an RCP datagram (for SYN-ACK)
+ *
+ * @param sender Pointer to the sender containing addressing information
+ * @param segment Pointer to the sender segment to convert
+ * @param ack Pointer to the acknowledgment information
+ * @return An RCP datagram containing the converted data with ACK flag set
+ */
+rcp_datagram_t sender_segment_with_ack_to_rcp(sender_t *sender, sender_segment_t *segment,
+                                              receiver_segment_t *ack) {
+    assert(sender);
+    assert(segment);
+    assert(ack);
+
+    /* First create a normal RCP datagram */
+    rcp_datagram_t datagram = sender_segment_to_rcp(sender, segment);
+
+    /* Then add ACK information */
+    rcp_set_flag(&datagram.header, RCP_FLAG_ACK);
+    datagram.header.ackno = ack->ackno;
+    datagram.header.window = ack->window_size;
+
+    /* Recompute the checksum with the added ACK information */
+    rcp_datagram_compute_checksum(&datagram);
+
+    return datagram;
+}
+
 /********* SENDER *********/
 
 /**
@@ -182,9 +246,13 @@ void transmit_segment(sender_t *sender, sender_segment_t *segment) {
  *
  * @param sender The sender to send the segment from
  * @param seg The segment to send
+ * @return True if successful, false otherwise
  */
-void sender_send_segment(sender_t *sender, sender_segment_t seg) {
+bool sender_send_segment(sender_t *sender, sender_segment_t seg) {
     assert(sender);
+
+    printk("  [SEND] Sending segment %u to %u with length %u\n", seg.seqno, seg.seqno + seg.len,
+           seg.len);
 
     // Send the segment to the remote peer
     transmit_segment(sender, &seg);
@@ -195,7 +263,7 @@ void sender_send_segment(sender_t *sender, sender_segment_t seg) {
         unacked_segment_t *pending = kmalloc(sizeof(unacked_segment_t));
         if (!pending) {
             // Handle memory allocation failure
-            return;
+            return false;
         }
 
         // Copy the segment data
@@ -218,6 +286,109 @@ void sender_send_segment(sender_t *sender, sender_segment_t seg) {
             sender->next_seqno++;
         }
     }
+
+    return true;
+}
+
+/**
+ * Send a segment with ACK to the remote peer (for SYN-ACK)
+ *
+ * @param sender The sender to send the segment from
+ * @param seg The segment to send
+ * @param ack The acknowledgment to include
+ * @return True if successful, false otherwise
+ */
+bool sender_send_segment_with_ack(sender_t *sender, sender_segment_t *seg,
+                                  receiver_segment_t *ack) {
+    assert(sender);
+    assert(seg);
+    assert(ack);
+
+    printk("  [SEND] Sending segment %u with ACK %u\n", seg->seqno, ack->ackno);
+
+    /* We always use the sender's NRF to send messages out */
+    nrf_t *sender_nrf = sender->nrf;
+
+    /* Get the next hop NRF address from the routing table */
+    uint8_t src_rcp = sender->local_addr;
+    uint8_t dst_rcp = sender->remote_addr;
+    uint32_t next_hop_nrf = rtable_map[src_rcp][dst_rcp];
+
+    /* Convert the sender_segment_t and receiver_segment_t to a rcp_datagram_t */
+    rcp_datagram_t datagram = sender_segment_with_ack_to_rcp(sender, seg, ack);
+
+    /* Serialize the datagram */
+    uint8_t buffer[RCP_TOTAL_SIZE];
+    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
+
+    /* Send the segment to the next hop NRF address */
+    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
+
+    // Only track segments with data, SYN, or FIN
+    if (seg->len > 0 || seg->is_syn || seg->is_fin) {
+        // Create a new unacked segment and copy the segment data
+        unacked_segment_t *pending = kmalloc(sizeof(unacked_segment_t));
+        if (!pending) {
+            // Handle memory allocation failure
+            return false;
+        }
+
+        // Copy the segment data
+        memcpy(&pending->seg, seg, sizeof(sender_segment_t));
+        pending->next = NULL;
+
+        // Set retransmission timer if this is the first segment in the queue
+        if (rtq_empty(&sender->pending_segs)) {
+            sender->rto_time_us = timer_get_usec() + sender->initial_RTO_us;
+        }
+
+        // Add the segment to the unacked queue
+        rtq_push(&sender->pending_segs, pending);
+
+        // Update next sequence number
+        sender->next_seqno += seg->len;
+
+        // SYN and FIN take up one sequence number each
+        if (seg->is_syn || seg->is_fin) {
+            sender->next_seqno++;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Send a pure ACK segment (no data)
+ *
+ * @param sender The sender to send the ACK from
+ * @param ack The acknowledgment to send
+ * @return True if successful, false otherwise
+ */
+bool sender_send_ack(sender_t *sender, receiver_segment_t *ack) {
+    assert(sender);
+    assert(ack);
+
+    printk("  [SEND] Sending pure ACK %u\n", ack->ackno);
+
+    /* We always use the sender's NRF to send messages out */
+    nrf_t *sender_nrf = sender->nrf;
+
+    /* Get the next hop NRF address from the routing table */
+    uint8_t src_rcp = sender->local_addr;
+    uint8_t dst_rcp = sender->remote_addr;
+    uint32_t next_hop_nrf = rtable_map[src_rcp][dst_rcp];
+
+    /* Convert the receiver_segment_t to a rcp_datagram_t */
+    rcp_datagram_t datagram = receiver_segment_to_rcp_from_sender(sender, ack);
+
+    /* Serialize the datagram */
+    uint8_t buffer[RCP_TOTAL_SIZE];
+    uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
+
+    /* Send the ACK to the next hop NRF address */
+    nrf_send_noack(sender_nrf, next_hop_nrf, buffer, length);
+
+    return true;
 }
 
 /**
@@ -239,7 +410,8 @@ void sender_push(sender_t *sender) {
     if (sender->window_size == 0) {
         if (rtq_empty(&sender->pending_segs)) {
             // Send a zero-length segment to probe for window update
-            sender_send_segment(sender, make_segment(sender, 0));
+            sender_segment_t seg = make_segment(sender, 0);
+            sender_send_segment(sender, seg);
         }
         return;
     }
@@ -254,7 +426,27 @@ void sender_push(sender_t *sender) {
     // Send data if available in the bytestream
     if (bs_bytes_available(&sender->reader)) {
         uint32_t remaining_space = receiver_max_seqno - sender->next_seqno;
-        sender_send_segment(sender, make_segment(sender, remaining_space));
+        sender_segment_t seg = make_segment(sender, remaining_space);
+        sender_send_segment(sender, seg);
+    } else if (bs_reader_finished(&sender->reader) && !rtq_empty(&sender->pending_segs)) {
+        // If bytestream is finished but we haven't sent FIN yet, send it
+        unacked_segment_t *last_seg = rtq_start(&sender->pending_segs);
+        bool fin_needed = true;
+
+        // Check if the last segment in the queue is already a FIN
+        while (last_seg) {
+            if (last_seg->seg.is_fin) {
+                fin_needed = false;
+                break;
+            }
+            last_seg = last_seg->next;
+        }
+
+        if (fin_needed) {
+            sender_segment_t fin_seg = {
+                .seqno = sender->next_seqno, .is_syn = false, .is_fin = true, .len = 0};
+            sender_send_segment(sender, fin_seg);
+        }
     }
 }
 
@@ -325,6 +517,8 @@ void sender_check_retransmits(sender_t *sender) {
     if (time_since_rto >= 0 && !rtq_empty(&sender->pending_segs)) {
         // Retransmit the oldest unacknowledged segment
         unacked_segment_t *seg = rtq_start(&sender->pending_segs);
+        printk(" [RETRANS]  Sending segment %u to %u with length %u\n", seg->seg.seqno,
+               seg->seg.seqno + seg->seg.len, seg->seg.len);
         transmit_segment(sender, &seg->seg);
 
         // Update retransmission timer - use exponential backoff if window is nonzero

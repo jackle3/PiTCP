@@ -1,7 +1,8 @@
 # PROGS += tests/test-rcp.c
 # PROGS += tests/test-bytestream.c
 # PROGS += tests/test-sender.c
-PROGS += tests/test-receiver.c
+# PROGS += tests/test-receiver.c
+PROGS += tests/test-tcp-mock-nrf.c
 
 
 LIBS += $(CS140E_PITCP)/lib/libgcc.a
