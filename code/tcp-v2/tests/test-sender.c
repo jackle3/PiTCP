@@ -56,7 +56,7 @@ static int mock_nrf_send_noack(nrf_t *nic, uint32_t txaddr, const void *msg, uns
                 memcpy(&last_segment, &seg, sizeof(sender_segment_t));
                 last_segment.is_syn = true;
                 segment_count++;
-            } else if (datagram.header.payload_len > 0) {
+            } else if (datagram.payload_len > 0) {
                 // Regular data packet
                 sender_segment_t seg = rcp_to_sender_segment(&datagram);
                 memcpy(&last_segment, &seg, sizeof(sender_segment_t));

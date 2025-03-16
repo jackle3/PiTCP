@@ -119,7 +119,7 @@ rcp_datagram_t receiver_segment_to_rcp_from_sender(sender_t *sender, receiver_se
 
     /* Zero out the unused fields */
     datagram.header.seqno = 0;
-    datagram.header.payload_len = 0;
+    datagram.payload_len = 0;
 
     /* Compute the checksum over header only (no payload) */
     rcp_datagram_compute_checksum(&datagram);

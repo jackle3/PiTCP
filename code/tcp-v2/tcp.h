@@ -45,11 +45,11 @@ sender_segment_t rcp_to_sender_segment(rcp_datagram_t *datagram) {
         .seqno = datagram->header.seqno,
         .is_syn = rcp_has_flag(&datagram->header, RCP_FLAG_SYN),
         .is_fin = rcp_has_flag(&datagram->header, RCP_FLAG_FIN),
-        .len = datagram->header.payload_len,
+        .len = datagram->payload_len,
     };
 
     /* Copy payload if present */
-    if (datagram->payload && datagram->header.payload_len > 0) {
+    if (datagram->payload && datagram->payload_len > 0) {
         memcpy(seg.payload, datagram->payload, seg.len);
     }
 
@@ -106,7 +106,7 @@ rcp_datagram_t create_syn_ack_datagram(sender_t *sender, receiver_t *receiver, u
     datagram.header.window = receiver->window_size;
 
     /* Zero out the payload length as SYN-ACK has no payload */
-    datagram.header.payload_len = 0;
+    datagram.payload_len = 0;
 
     /* Compute the checksum */
     rcp_datagram_compute_checksum(&datagram);
@@ -481,7 +481,7 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
             }
 
             /* Process data segment if present */
-            if (datagram.header.payload_len > 0) {
+            if (datagram.payload_len > 0) {
                 sender_segment_t data_segment = rcp_to_sender_segment(&datagram);
                 printk("  [RECV %x] segment from %u to %u with length %u\n",
                        peer->receiver.local_addr, data_segment.seqno,

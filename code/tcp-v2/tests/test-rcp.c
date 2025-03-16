@@ -1,6 +1,6 @@
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdbool.h>
 
 #include "rcp-datagram.h"
 
@@ -62,22 +62,22 @@ static void test_rcp_checksum(void) {
 
     // Compute checksum
     uint16_t original_checksum = datagram.header.cksum;
-    rcp_compute_checksum(&datagram.header, datagram.payload);
+    rcp_datagram_compute_checksum(&datagram);
     assert(datagram.header.cksum != original_checksum);
     printk("Checksum computed: %x\n", datagram.header.cksum);
 
     // Verify checksum
-    assert(rcp_verify_checksum(&datagram.header, datagram.payload));
+    assert(rcp_datagram_verify_checksum(&datagram));
     printk("Checksum verified successfully\n");
 
     // Modify the payload and verify checksum fails
     datagram.payload[0] = 'X';
-    assert(!rcp_verify_checksum(&datagram.header, datagram.payload));
+    assert(!rcp_datagram_verify_checksum(&datagram));
     printk("Modified payload checksum verification failed as expected\n");
 
     // Recompute checksum with modified payload
-    rcp_compute_checksum(&datagram.header, datagram.payload);
-    assert(rcp_verify_checksum(&datagram.header, datagram.payload));
+    rcp_datagram_compute_checksum(&datagram);
+    assert(rcp_datagram_verify_checksum(&datagram));
     printk("Recomputed checksum verified successfully\n");
 
     printk("RCP checksum operations passed!\n");
@@ -105,7 +105,7 @@ static void test_rcp_serialization(void) {
     rcp_datagram_set_payload(&datagram, (uint8_t *)test_payload, strlen(test_payload));
 
     // Compute checksum
-    rcp_compute_checksum(&datagram.header, datagram.payload);
+    rcp_datagram_compute_checksum(&datagram);
 
     // Serialize the datagram
     uint8_t buffer[RCP_TOTAL_SIZE];
@@ -127,12 +127,12 @@ static void test_rcp_serialization(void) {
     assert(parsed_datagram.header.window == datagram.header.window);
     assert(parsed_datagram.header.flags == datagram.header.flags);
     assert(parsed_datagram.header.cksum == datagram.header.cksum);
-    assert(parsed_datagram.header.payload_len == datagram.header.payload_len);
-    assert(memcmp(parsed_datagram.payload, datagram.payload, datagram.header.payload_len) == 0);
+    assert(parsed_datagram.payload_len == datagram.payload_len);
+    assert(memcmp(parsed_datagram.payload, datagram.payload, datagram.payload_len) == 0);
     printk("Parsed datagram fields match original\n");
 
     // Verify the checksum of the parsed datagram
-    assert(rcp_verify_checksum(&parsed_datagram.header, parsed_datagram.payload));
+    assert(rcp_datagram_verify_checksum(&parsed_datagram));
     printk("Parsed datagram checksum verified\n");
 
     printk("RCP serialization and parsing passed!\n");
@@ -143,6 +143,12 @@ void notmain(void) {
     printk("Starting RCP implementation tests...\n\n");
     kmalloc_init(64);
     printk("Memory initialized\n");
+
+    printk("RCP_HEADER_LENGTH: %u\n", RCP_HEADER_LENGTH);
+    printk("sizeof(rcp_header_t): %u\n", sizeof(rcp_header_t));
+
+    printk("RCP_DATAGRAM_LENGTH: %u\n", RCP_TOTAL_SIZE);
+    printk("sizeof(rcp_datagram_t): %u\n", sizeof(rcp_datagram_t));
 
     test_rcp_flags();
     test_rcp_checksum();

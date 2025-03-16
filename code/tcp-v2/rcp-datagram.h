@@ -6,8 +6,9 @@
  * Contains both the header and payload of an RCP packet
  */
 typedef struct rcp_datagram {
-    rcp_header_t header; /* RCP header */
-    uint8_t* payload;    /* Pointer to payload data */
+    rcp_header_t header;              /* RCP header */
+    uint8_t payload_len;              /* Length of payload data */
+    uint8_t payload[RCP_MAX_PAYLOAD]; /* Fixed-size payload buffer */
 } rcp_datagram_t;
 
 /* Forward declarations for inline functions */
@@ -21,10 +22,10 @@ static inline int rcp_datagram_verify_checksum(const rcp_datagram_t* dgram);
 
 /* Initialize a new RCP datagram with default header values */
 static inline rcp_datagram_t rcp_datagram_init(void) {
-    rcp_datagram_t dgram = {
-        .header = rcp_header_init(),
-        .payload = NULL,
-    };
+    rcp_datagram_t dgram;
+    dgram.header = rcp_header_init();
+    dgram.payload_len = 0;
+    memset(dgram.payload, 0, RCP_MAX_PAYLOAD);
     return dgram;
 }
 
@@ -39,20 +40,19 @@ static inline int rcp_datagram_parse(rcp_datagram_t* dgram, const void* data, si
     // Parse header first
     rcp_header_parse(&dgram->header, data);
 
-    // Get payload length from header
-    size_t payload_len = dgram->header.payload_len;
-    if (payload_len > RCP_MAX_PAYLOAD || length < RCP_HEADER_LENGTH + payload_len) {
-        return 0;  // Invalid length or not enough data
+    // Get payload length from the data after the header
+    if (length > RCP_HEADER_LENGTH) {
+        dgram->payload_len = length - RCP_HEADER_LENGTH;
+        if (dgram->payload_len > RCP_MAX_PAYLOAD) {
+            return 0;  // Invalid length
+        }
+    } else {
+        dgram->payload_len = 0;
     }
 
-    // Allocate and copy payload if present
-    if (payload_len > 0) {
-        dgram->payload = kmalloc(payload_len);
-        if (!dgram->payload) {
-            return 0;  // Memory allocation failed
-        }
-
-        memcpy(dgram->payload, (const uint8_t*)data + RCP_HEADER_LENGTH, payload_len);
+    // Copy payload if present
+    if (dgram->payload_len > 0) {
+        memcpy(dgram->payload, (const uint8_t*)data + RCP_HEADER_LENGTH, dgram->payload_len);
     }
 
     return 1;
@@ -66,7 +66,7 @@ static inline int rcp_datagram_serialize(const rcp_datagram_t* dgram, void* data
         return -1;
     }
 
-    size_t total_length = RCP_HEADER_LENGTH + dgram->header.payload_len;
+    size_t total_length = RCP_HEADER_LENGTH + dgram->payload_len;
     if (max_length < total_length || total_length > RCP_TOTAL_SIZE) {
         return -1;  // Buffer too small or packet too large
     }
@@ -75,8 +75,8 @@ static inline int rcp_datagram_serialize(const rcp_datagram_t* dgram, void* data
     rcp_header_serialize(&dgram->header, data);
 
     // Copy payload if present
-    if (dgram->payload && dgram->header.payload_len > 0) {
-        memcpy((uint8_t*)data + RCP_HEADER_LENGTH, dgram->payload, dgram->header.payload_len);
+    if (dgram->payload_len > 0) {
+        memcpy((uint8_t*)data + RCP_HEADER_LENGTH, dgram->payload, dgram->payload_len);
     }
 
     return total_length;
@@ -91,16 +91,13 @@ static inline int rcp_datagram_set_payload(rcp_datagram_t* dgram, const void* da
     }
 
     if (data && length > 0) {
-        // Allocate and copy new payload
-        dgram->payload = kmalloc(length);
-        if (!dgram->payload) {
-            return -1;  // Memory allocation failed
-        }
-
+        // Copy new payload
         memcpy(dgram->payload, data, length);
-        dgram->header.payload_len = length;
+        dgram->payload_len = length;
     } else {
-        dgram->header.payload_len = 0;
+        // Clear payload
+        memset(dgram->payload, 0, RCP_MAX_PAYLOAD);
+        dgram->payload_len = 0;
     }
 
     return 0;
@@ -113,7 +110,7 @@ static inline void rcp_datagram_compute_checksum(rcp_datagram_t* dgram) {
     }
 
     // Compute checksum over header and payload
-    rcp_compute_checksum(&dgram->header, dgram->payload);
+    rcp_compute_checksum(&dgram->header, dgram->payload, dgram->payload_len);
 }
 
 /* Verify the checksum of an RCP datagram
@@ -124,5 +121,5 @@ static inline int rcp_datagram_verify_checksum(const rcp_datagram_t* dgram) {
     }
 
     // Verify checksum of both header and payload
-    return rcp_verify_checksum(&dgram->header, dgram->payload);
+    return rcp_verify_checksum(&dgram->header, dgram->payload, dgram->payload_len);
 }
