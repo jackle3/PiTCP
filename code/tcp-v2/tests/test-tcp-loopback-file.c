@@ -24,12 +24,12 @@
 #define SERVER_NRF_ADDR server_addr
 
 // Test parameters
-#define MAX_ITERATIONS 1000        // Maximum iterations for each phase
 #define TIME_WAIT_ITERATIONS 1000  // Maximum iterations for TIME_WAIT
 #define TICK_DELAY_MS 10           // Delay between ticks in milliseconds
 
 // Test data to send
-#include "byte-array-hello.h"
+// #include "byte-array-hello.h"
+#include "byte-array-small-file.h"
 
 /**
  * Helper function to print the TCP state name
@@ -145,8 +145,7 @@ static bool test_tcp_loopback(void) {
     int iterations = 0;
     printk("Waiting for connection establishment...\n");
 
-    while ((!tcp_is_established(&client) || !tcp_is_established(&server)) &&
-           iterations < MAX_ITERATIONS) {
+    while ((!tcp_is_established(&client) || !tcp_is_established(&server))) {
         // Run one round of ticks
         run_ticks(&client, &server, 1);
         iterations++;
@@ -192,7 +191,7 @@ static bool test_tcp_loopback(void) {
     size_t bytes_received = 0;
 
     printk("Starting data transfer...\n\n");
-    while (bytes_received < message_len && iterations < MAX_ITERATIONS * 2) {
+    while (bytes_received < message_len) {
         size_t remaining_to_send = message_len - bytes_written;
         if (remaining_to_send > 0 && tcp_has_space(&client)) {
             size_t new_bytes_written =
@@ -214,6 +213,7 @@ static bool test_tcp_loopback(void) {
 
         // Log progress periodically
         if (iterations % 20 == 0) {
+            printk("\n");
             printk("Transfer progress (iterations: %d):\n", iterations);
             printk("  Client has written: %u/%u bytes\n", bytes_written, message_len);
             printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
@@ -225,15 +225,28 @@ static bool test_tcp_loopback(void) {
             printk("  Next seqno: %u\n", client.sender.next_seqno);
             printk("  Acked seqno: %u\n", client.sender.acked_seqno);
             printk("  Window size: %u\n", client.sender.window_size);
+            printk("  Space available: %u\n", tcp_space_available(&client));
 
             // Print the status about the server (receiver)
             printk("Server (receiver) status:\n");
             printk("  Next seqno: %u\n", server.receiver.next_seqno);
             printk("  Window size: %u\n", server.receiver.window_size);
-            printk("\n");
+            printk("  Bytes available: %u\n", tcp_bytes_available(&server));
+
+            // Print the current state of the retransmission queue
+            printk("Retransmission queue (size: %u):\n", client.segs_in_flight);
+            printk("  Earliest seqno in flight: %u to %u\n",
+                   client.rtx_queue.head->segment.sender_segment.seqno,
+                   client.rtx_queue.head->segment.sender_segment.seqno +
+                       client.rtx_queue.head->segment.sender_segment.len);
+            printk("  Latest seqno in flight: %u to %u\n",
+                   client.rtx_queue.tail->segment.sender_segment.seqno,
+                   client.rtx_queue.tail->segment.sender_segment.seqno +
+                       client.rtx_queue.tail->segment.sender_segment.len);
         }
     }
 
+    printk("\n");
     printk("Finished sending in %d iterations\n", iterations);
     printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
     printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
@@ -291,7 +304,7 @@ static bool test_tcp_loopback(void) {
     bool client_fin_acked = false;
 
     printk("Waiting for client FIN to be acknowledged...\n");
-    while (!client_fin_acked && iterations < MAX_ITERATIONS) {
+    while (!client_fin_acked) {
         run_ticks(&client, &server, 1);
         iterations++;
 

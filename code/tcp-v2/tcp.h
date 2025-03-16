@@ -94,6 +94,7 @@ typedef struct tcp_peer {
     tcp_state_t state; /* Current TCP connection state */
 
     tcp_rtx_queue_t rtx_queue;  /* Queue of segments that need acknowledgment */
+    uint32_t segs_in_flight;    /* Number of segments in flight */
     uint32_t initial_RTO_us;    /* Initial retransmission timeout */
     uint32_t rto_us;            /* Next time to retransmit - when time >= rto_us, retransmit */
     int16_t consec_retransmits; /* Number of consecutive retransmits */
@@ -324,8 +325,26 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
 
             // Add to the end of the queue
             memcpy(&rtx_segment->segment, segment, sizeof(tcp_segment_t));
-            rtx_segment->next = NULL;
+
+            printk("  [TCP %x] Adding segment to retransmission queue: ", peer->sender.local_addr);
+            if (rtx_segment->segment.has_sender_segment) {
+                printk("seqno=%u ", rtx_segment->segment.sender_segment.seqno);
+                if (rtx_segment->segment.sender_segment.is_syn)
+                    printk("syn=1 ");
+                if (rtx_segment->segment.sender_segment.is_fin)
+                    printk("fin=1 ");
+                printk("len=%u ", rtx_segment->segment.sender_segment.len);
+            }
+            if (rtx_segment->segment.has_receiver_segment) {
+                printk("ackno=%u ", rtx_segment->segment.receiver_segment.ackno);
+                if (rtx_segment->segment.receiver_segment.is_ack)
+                    printk("ack=1 ");
+                printk("window=%u ", rtx_segment->segment.receiver_segment.window_size);
+            }
+            printk("\n");
+
             tcp_rtx_append(&peer->rtx_queue, rtx_segment);
+            peer->segs_in_flight++;
 
             // Update sender's sequence number
             sender_segment_sent(&peer->sender, &segment->sender_segment);
@@ -379,6 +398,7 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
             // Only consider segments with sender data
             if (!rtx_seg->segment.has_sender_segment) {
                 tcp_rtx_pop(&peer->rtx_queue);
+                peer->segs_in_flight--;
                 continue;
             }
 
@@ -397,6 +417,7 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
                     "queue\n",
                     rtx_seg->segment.sender_segment.seqno);
                 tcp_rtx_pop(&peer->rtx_queue);
+                peer->segs_in_flight--;
                 new_data_acked = true;
             } else {
                 // Stop at first unacknowledged segment
@@ -1002,5 +1023,6 @@ static inline void tcp_cleanup(tcp_peer_t *peer) {
     // Clean up the retransmission queue
     while (!tcp_rtx_empty(&peer->rtx_queue)) {
         unacked_tcp_segment_t *seg = tcp_rtx_pop(&peer->rtx_queue);
+        peer->segs_in_flight--;
     }
 }

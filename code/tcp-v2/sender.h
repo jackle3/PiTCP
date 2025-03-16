@@ -82,9 +82,11 @@ static inline bool sender_segment_sent(sender_t *sender, sender_segment_t *segme
     assert(segment);
 
     // Only update sequence number for segments with data, SYN, or FIN
-    if (segment->len > 0 || segment->is_syn || segment->is_fin) {
+    // and only if the segment is in the future (seqno is past what we've sent)
+    if ((segment->len > 0 || segment->is_syn || segment->is_fin) &&
+        segment->seqno >= sender->next_seqno) {
         // Update next sequence number
-        sender->next_seqno += segment->len;
+        sender->next_seqno = segment->seqno + segment->len;
 
         // SYN and FIN take up one sequence number each
         if (segment->is_syn || segment->is_fin) {
