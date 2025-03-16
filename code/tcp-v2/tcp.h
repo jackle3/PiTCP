@@ -151,7 +151,7 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *sender_nrf, nrf_t *receiver_nrf, u
 static inline bool tcp_send_syn(tcp_peer_t *peer) {
     assert(peer);
 
-    /* Create a SYN segment with the initial sequence number */
+    /* Create a SYN segment with the initial sequence number 0 */
     sender_segment_t syn_seg = {
         .seqno = 0, /* Initial sequence number */
         .is_syn = true,
@@ -187,17 +187,17 @@ static inline bool tcp_send_syn_ack(tcp_peer_t *peer, uint32_t recv_seqno) {
 
     /* Send the SYN-ACK to the remote peer */
     uint32_t next_hop_nrf = rtable_map[peer->sender.local_addr][peer->sender.remote_addr];
+    printk("  [SEND %x] sending reply from %u (%x) to %u (%x) with length %u\n",
+           peer->sender.local_addr, peer->sender.local_addr, peer->sender.nrf->rxaddr,
+           peer->sender.remote_addr, next_hop_nrf, length);
     nrf_send_noack(peer->sender.nrf, next_hop_nrf, buffer, length);
 
     printk("  [SEND %x] SYN-ACK with seqno %u, ackno %u\n", peer->sender.local_addr,
            peer->sender.next_seqno, recv_seqno + 1);
 
-    /* Update the sender's sequence number */
-    peer->sender.next_seqno++;
-
     /* Create a pending segment for retransmission if needed */
     sender_segment_t syn_ack_seg = {
-        .seqno = peer->sender.next_seqno - 1, /* We just incremented */
+        .seqno = peer->sender.next_seqno, /* Current sequence number */
         .is_syn = true,
         .is_fin = false,
         .len = 0 /* SYN-ACK has no payload */
@@ -215,6 +215,9 @@ static inline bool tcp_send_syn_ack(tcp_peer_t *peer, uint32_t recv_seqno) {
 
         rtq_push(&peer->sender.pending_segs, pending);
     }
+
+    /* Update the sender's sequence number AFTER creating the segment */
+    peer->sender.next_seqno++;
 
     peer->state = TCP_SYN_RECEIVED;
     return true;
@@ -330,14 +333,18 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
         return; /* No data or error */
     }
 
+    printk("  [RECV %x] packet with length %u\n", peer->receiver.local_addr, ret);
+
     /* Try to parse the read packet into an RCP datagram */
     rcp_datagram_t datagram = rcp_datagram_init();
     if (rcp_datagram_parse(&datagram, buffer, ret) <= 0) {
+        printk("  [RECV %x] failed to parse packet\n", peer->receiver.local_addr);
         return; /* Parsing failed */
     }
 
     /* Verify the checksum of the received packet */
     if (!rcp_datagram_verify_checksum(&datagram)) {
+        printk("  [RECV %x] invalid checksum\n", peer->receiver.local_addr);
         return; /* Invalid checksum */
     }
 
@@ -361,6 +368,9 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
                 /* Set receiver's initial sequence number */
                 peer->receiver.syn_received = true;
                 peer->receiver.next_seqno = datagram.header.seqno + 1;
+
+                /* Reset sender's sequence number to 0 for a new connection */
+                peer->sender.next_seqno = 0;
 
                 /* Send SYN-ACK */
                 tcp_send_syn_ack(peer, datagram.header.seqno);
@@ -408,7 +418,7 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
                 /* Update receiver's sequence number */
                 peer->receiver.next_seqno = datagram.header.seqno + 1;
 
-                /* Send SYN-ACK */
+                /* Send SYN-ACK using our existing sequence number - don't reset it */
                 tcp_send_syn_ack(peer, datagram.header.seqno);
             }
             break;
@@ -427,6 +437,32 @@ static inline void tcp_check_incoming(tcp_peer_t *peer) {
                 /* Connection is now established */
                 peer->state = TCP_ESTABLISHED;
                 printk("  [INFO] Connection established\n");
+            }
+            /* If in SYN_RECEIVED and receive SYN, resend SYN-ACK (our SYN-ACK was probably lost) */
+            else if (is_syn && !is_ack) {
+                /* Received SYN again: Resend SYN-ACK */
+                printk("  [RECV %x] Duplicate SYN from %u\n", peer->receiver.local_addr,
+                       datagram.header.seqno);
+
+                /* Update receiver's initial sequence number if needed */
+                peer->receiver.syn_received = true;
+                peer->receiver.next_seqno = datagram.header.seqno + 1;
+
+                /* Resend SYN-ACK - don't modify our sequence number */
+                rcp_datagram_t datagram = create_syn_ack_datagram(&peer->sender, &peer->receiver,
+                                                                  peer->receiver.next_seqno);
+
+                /* Serialize the datagram */
+                uint8_t buffer[RCP_TOTAL_SIZE];
+                uint16_t length = rcp_datagram_serialize(&datagram, buffer, RCP_TOTAL_SIZE);
+
+                /* Send the SYN-ACK to the remote peer */
+                uint32_t next_hop_nrf =
+                    rtable_map[peer->sender.local_addr][peer->sender.remote_addr];
+                nrf_send_noack(peer->sender.nrf, next_hop_nrf, buffer, length);
+
+                printk("  [SEND %x] Resending SYN-ACK with seqno %u, ackno %u\n",
+                       peer->sender.local_addr, peer->sender.next_seqno - 1, datagram.header.ackno);
             }
             break;
 

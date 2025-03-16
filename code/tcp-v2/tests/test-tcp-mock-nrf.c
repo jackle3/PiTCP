@@ -309,7 +309,8 @@ void test_tcp_handshake_and_data_transfer() {
     printk("Server receiver state: syn_received: %d, next_seqno: %u, window_size: %u\n",
            server.receiver.syn_received, server.receiver.next_seqno, server.receiver.window_size);
 
-    const char *client_message = "Hello from client!";
+    const char *client_message =
+        "Hello from client! This is a long message that will be split into multiple segments.";
     size_t client_message_len = strlen(client_message);
 
     // Write data to client
@@ -353,7 +354,8 @@ void test_tcp_handshake_and_data_transfer() {
     // Step 3: Send data from server to client
     printk("\nStep 3: Sending data from server to client\n");
 
-    const char *server_message = "Response from server!";
+    const char *server_message =
+        "Response from server! This is a long message that will be split into multiple segments.";
     size_t server_message_len = strlen(server_message);
 
     // Write data to server
