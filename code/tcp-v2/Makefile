@@ -1,10 +1,6 @@
-# PROGS += tests/test-rcp.c
 # PROGS += tests/test-bytestream.c
-# PROGS += tests/test-sender.c
-# PROGS += tests/test-receiver.c
-# PROGS += tests/test-tcp-mock-nrf.c
-# PROGS += tests/test-tcp-nrf.c
-PROGS += tests/test-tcp-loopback.c
+# PROGS += tests/test-tcp-loopback.c
+PROGS += tests/test-tcp-loopback-file.c
 
 LIBS += $(CS140E_PITCP)/lib/libgcc.a
 
@@ -25,6 +21,7 @@ COMMON_SRC += $(CS140E_PITCP)/code/nrf/nrf-public.c
 # Flags for include paths
 CFLAGS += -I$(CS140E_PITCP)/code/nrf
 CFLAGS += -I$(CS140E_PITCP)/code/nrf/tests
+CFLAGS += -I$(CS140E_PITCP)/code/tcp-v2/code-gen-src
 
 
 STAFF_OBJS += $(CS140E_PITCP)/libpi/staff-objs/staff-hw-spi.o

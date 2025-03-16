@@ -3,15 +3,6 @@
 #include "bytestream.h"
 #include "types.h"
 
-// #define DEBUG
-
-// Debug printing macros
-#ifdef DEBUG
-#define DEBUG_PRINT(fmt, args...) printk(fmt, ##args)
-#else
-#define DEBUG_PRINT(fmt, args...) /* nothing */
-#endif
-
 /********* TYPES *********/
 
 /* Receiver state structure */

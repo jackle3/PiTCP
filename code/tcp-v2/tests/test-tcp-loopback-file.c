@@ -24,15 +24,12 @@
 #define SERVER_NRF_ADDR server_addr
 
 // Test parameters
-#define MAX_ITERATIONS 100         // Maximum iterations for each phase
+#define MAX_ITERATIONS 1000        // Maximum iterations for each phase
 #define TIME_WAIT_ITERATIONS 1000  // Maximum iterations for TIME_WAIT
 #define TICK_DELAY_MS 10           // Delay between ticks in milliseconds
 
 // Test data to send
-static const char *test_message =
-    "This is a test message sent over TCP.\n"
-    "If you can read this, the connection is working properly.\n"
-    "This message tests reliable data transfer using our TCP implementation.\n";
+#include "byte-array-hello.h"
 
 /**
  * Helper function to print the TCP state name
@@ -155,11 +152,9 @@ static bool test_tcp_loopback(void) {
         iterations++;
 
         // Log progress periodically
-        if (iterations % 5 == 0) {
-            printk("  Handshake progress (iterations: %d):\n", iterations);
-            printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-                   tcp_state_name(server.state));
-        }
+        printk("  Handshake progress (iterations: %d):\n", iterations);
+        printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
+               tcp_state_name(server.state));
     }
 
     // Check if connection was established
@@ -180,10 +175,10 @@ static bool test_tcp_loopback(void) {
     printk("\n--- Phase 2: Data Transfer ---\n");
 
     // Send test message from client to server
-    size_t message_len = strlen(test_message);
+    size_t message_len = binary_length;
     printk("Sending %u bytes of data from client to server...\n", message_len);
 
-    size_t bytes_written = tcp_write(&client, (uint8_t *)test_message, message_len);
+    size_t bytes_written = tcp_write(&client, (uint8_t *)binary_data, message_len);
     printk("Client wrote %u/%u bytes\n", bytes_written, message_len);
 
     if (bytes_written != message_len) {
@@ -192,34 +187,67 @@ static bool test_tcp_loopback(void) {
 
     // Run ticks until all data is transferred or max iterations reached
     iterations = 0;
-    bool data_received = false;
+    size_t bytes_received = 0;
 
     printk("Waiting for data transfer completion...\n");
-    while (!data_received && iterations < MAX_ITERATIONS * 2) {
+    while (bytes_received < message_len && iterations < MAX_ITERATIONS * 2) {
+        size_t remaining_to_send = message_len - bytes_written;
+        if (remaining_to_send > 0 && tcp_has_space(&client)) {
+            size_t new_bytes_written =
+                tcp_write(&client, binary_data + bytes_written, remaining_to_send);
+            bytes_written += new_bytes_written;
+            if (new_bytes_written > 0) {
+                printk("Client wrote %u more bytes (%u/%u total)\n", new_bytes_written,
+                       bytes_written, message_len);
+            }
+        }
+
         // Run ticks
         run_ticks(&client, &server, 1);
         iterations++;
 
         // Check if server has received data
-        if (tcp_has_data(&server) && bs_bytes_available(&server.receiver.writer) >= message_len) {
-            data_received = true;
+        if (tcp_has_data(&server)) {
+            // Print the received data
+            uint8_t receive_buffer[128];
+            size_t bytes_read = tcp_read(&server, receive_buffer, sizeof(receive_buffer));
+            bytes_received += bytes_read;
+
+            printk("Received data (%u/%u bytes):\n", bytes_received, message_len);
+            for (size_t i = 0; i < bytes_read; i++) {
+                printk("%x ", receive_buffer[i]);
+            }
+            printk("\n");
         }
 
         // Log progress periodically
-        if (iterations % 10 == 0) {
-            printk("  Transfer progress (iterations: %d):\n", iterations);
-            printk("  Server has received: %u/%u bytes\n",
-                   bs_bytes_available(&server.receiver.writer), message_len);
+        if (iterations % 30 == 0) {
+            printk("Transfer progress (iterations: %d):\n", iterations);
+            printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
             printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
                    tcp_state_name(server.state));
+
+            // Print the status about the client (sender)
+            printk("Client (sender) status:\n");
+            printk("  Next seqno: %u\n", client.sender.next_seqno);
+            printk("  Acked seqno: %u\n", client.sender.acked_seqno);
+            printk("  Window size: %u\n", client.sender.window_size);
+            printk("  Local addr: %u\n", client.sender.local_addr);
+            printk("  Remote addr: %u\n", client.sender.remote_addr);
+
+            // Print the status about the server (receiver)
+            printk("Server (receiver) status:\n");
+            printk("  Next seqno: %u\n", server.receiver.next_seqno);
+            printk("  Window size: %u\n", server.receiver.window_size);
+            printk("  Total size: %u\n", server.receiver.total_size);
+            printk("\n\n");
         }
     }
 
     // Check if data transfer completed
-    if (!data_received) {
+    if (bytes_received < message_len) {
         printk("ERROR: Data transfer failed after %d iterations\n", iterations);
-        printk("Server received %u/%u bytes\n", bs_bytes_available(&server.receiver.writer),
-               message_len);
+        printk("Server received %u/%u bytes\n", bytes_received, message_len);
         return false;
     }
 
@@ -234,7 +262,7 @@ static bool test_tcp_loopback(void) {
 
     // Verify data integrity
     bool data_matches =
-        (bytes_read == message_len && memcmp(receive_buffer, test_message, message_len) == 0);
+        (bytes_read == message_len && memcmp(receive_buffer, binary_data, message_len) == 0);
 
     if (data_matches) {
         printk("Data verification: SUCCESS!\n");
