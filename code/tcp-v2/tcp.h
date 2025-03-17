@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rcp-datagram.h"
 #include "bytestream.h"
 #include "nrf.h"
 #include "queue-ext-T.h"

@@ -1,6 +1,7 @@
 # PROGS += tests/test-bytestream.c
 # PROGS += tests/test-tcp-loopback.c
-PROGS += tests/test-tcp-loopback-file.c
+# PROGS += tests/test-tcp-loopback-file.c
+PROGS += programs/tcp-router.c
 
 LIBS += $(CS140E_PITCP)/lib/libgcc.a
 
