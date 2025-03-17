@@ -168,6 +168,14 @@ static bool test_tcp_loopback(void) {
     printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
            tcp_state_name(server.state));
 
+    // Print TCP statistics after connection establishment
+    printk("\n=== TCP Statistics after Connection Establishment ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
+
     //---------------------------------------------------------------------
     // Phase 2: Data transfer
     //---------------------------------------------------------------------
@@ -261,6 +269,7 @@ static bool test_tcp_loopback(void) {
     printk("  Next seqno: %u\n", server.receiver.next_seqno);
     printk("  Window size: %u\n", server.receiver.window_size);
     printk("  Total size: %u\n", server.receiver.total_size);
+    printk("  Fin received: %d\n", server.receiver.fin_received);
     printk("\n");
 
     // Check if data transfer completed
@@ -287,6 +296,14 @@ static bool test_tcp_loopback(void) {
         printk("Expected %u bytes, received %u bytes\n", message_len, bytes_received);
         return false;
     }
+
+    // Print TCP statistics after data transfer
+    printk("\n=== TCP Statistics after Data Transfer ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
 
     //---------------------------------------------------------------------
     // Phase 3: Connection termination (FIN handshake)
@@ -371,6 +388,14 @@ static bool test_tcp_loopback(void) {
                tcp_state_name(server.state));
     }
 
+    // Print TCP statistics after connection termination
+    printk("\n=== TCP Statistics after Connection Termination ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
+
     // Clean up resources
     tcp_cleanup(&client);
     tcp_cleanup(&server);
@@ -392,6 +417,14 @@ static bool test_tcp_loopback(void) {
     printk("    Total size: %u\n", server.receiver.total_size);
     printk("    Fin received: %d\n", server.receiver.fin_received);
     printk("\n");
+
+    // Print TCP statistics
+    printk("\n=== TCP Connection Statistics ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
 
     // Print NRF statistics
     nrf_stat_print(client_nrf, "Client NRF stats");
