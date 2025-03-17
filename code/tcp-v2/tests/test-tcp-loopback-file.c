@@ -70,7 +70,7 @@ static void run_ticks(tcp_peer_t *client, tcp_peer_t *server, int count) {
     for (int i = 0; i < count; i++) {
         tcp_tick(client);
         tcp_tick(server);
-        delay_ms(TICK_DELAY_MS);
+        // delay_ms(TICK_DELAY_MS);
     }
 }
 
