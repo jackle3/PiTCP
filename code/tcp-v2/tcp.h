@@ -387,12 +387,12 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
     // Process receiver part with sender
     if (segment->has_receiver_segment && segment->receiver_segment.is_ack) {
         DEBUG_PRINT(" [TCP] Processing ACK\n");
+
         // Update sender's acknowledged sequence number
         sender_process_ack(&peer->sender, &segment->receiver_segment);
 
-        bool new_data_acked = false;
-
         // Remove acknowledged segments from retransmission queue
+        bool new_data_acked = false;
         while (!tcp_rtx_empty(&peer->rtx_queue)) {
             unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
 
@@ -404,26 +404,25 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
             }
 
             // Calculate end sequence number for this segment
-            uint16_t seg_end_seqno =
-                rtx_seg->segment.sender_segment.seqno + rtx_seg->segment.sender_segment.len;
+            uint32_t seg_abs_seqno =
+                unwrap_seqno(rtx_seg->segment.sender_segment.seqno, peer->sender.next_seqno);
+            uint32_t seg_end_seqno = seg_abs_seqno + rtx_seg->segment.sender_segment.len;
 
             if (rtx_seg->segment.sender_segment.is_syn || rtx_seg->segment.sender_segment.is_fin) {
                 seg_end_seqno++;
             }
 
-            // If this segment is fully acknowledged, remove it
-            if (segment->receiver_segment.ackno >= seg_end_seqno) {
-                DEBUG_PRINT(
-                    " [TCP] Segment seqno %u fully acknowledged, removing from retransmission "
-                    "queue\n",
-                    rtx_seg->segment.sender_segment.seqno);
-                tcp_rtx_pop(&peer->rtx_queue);
-                peer->segs_in_flight--;
-                new_data_acked = true;
-            } else {
-                // Stop at first unacknowledged segment
+            // Queue is sorted by absolute seqno, so stop once we find an unacked segment
+            if (peer->sender.acked_seqno < seg_end_seqno) {
                 break;
             }
+
+            DEBUG_PRINT(" [TCP] Segment seqno %u fully acknowledged, removing from rtx queue\n",
+                        rtx_seg->segment.sender_segment.seqno);
+
+            tcp_rtx_pop(&peer->rtx_queue);
+            peer->segs_in_flight--;
+            new_data_acked = true;
         }
 
         // If new data was acknowledged, reset the retransmission timer

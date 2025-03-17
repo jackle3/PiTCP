@@ -13,8 +13,8 @@ typedef struct sender {
     bytestream_t reader;  /* App writes data to it, sender reads from it */
     uint8_t local_addr;   /* Local RCP address */
     uint8_t remote_addr;  /* Remote RCP address */
-    uint16_t next_seqno;  /* Next sequence number to send */
-    uint16_t acked_seqno; /* Sequence number of the highest acked segment */
+    uint32_t next_seqno;  /* Next absolute sequence number to send */
+    uint32_t acked_seqno; /* Sequence number of the highest absolute acked segment */
     uint16_t window_size; /* Receiver's advertised window size */
 } sender_t;
 
@@ -51,7 +51,7 @@ static inline sender_segment_t make_segment(sender_t *sender, size_t len) {
 
     sender_segment_t seg = {
         .len = 0,
-        .seqno = sender->next_seqno,
+        .seqno = wrap_seqno(sender->next_seqno),
         .is_syn = (sender->next_seqno == 0),
         .is_fin = false,
     };
@@ -82,15 +82,19 @@ static inline bool sender_segment_sent(sender_t *sender, sender_segment_t *segme
     assert(segment);
 
     // Only update sequence number for segments with data, SYN, or FIN
-    // and only if the segment is in the future (seqno is past what we've sent)
-    if ((segment->len > 0 || segment->is_syn || segment->is_fin) &&
-        segment->seqno >= sender->next_seqno) {
-        // Update next sequence number
-        sender->next_seqno = segment->seqno + segment->len;
+    if (segment->len > 0 || segment->is_syn || segment->is_fin) {
+        // Unwrap the segment's sequence number to compare with next_seqno
+        uint32_t abs_seqno = unwrap_seqno(segment->seqno, sender->next_seqno);
 
-        // SYN and FIN take up one sequence number each
-        if (segment->is_syn || segment->is_fin) {
-            sender->next_seqno++;
+        // Only update if the segment is in the future (seqno is past what we've sent)
+        if (abs_seqno >= sender->next_seqno) {
+            // Update next sequence number
+            sender->next_seqno = abs_seqno + segment->len;
+
+            // SYN and FIN take up one sequence number each
+            if (segment->is_syn || segment->is_fin) {
+                sender->next_seqno++;
+            }
         }
     }
 
@@ -108,13 +112,17 @@ static inline void sender_process_ack(sender_t *sender, receiver_segment_t *repl
     assert(reply);
 
     if (reply->is_ack) {
+        uint32_t abs_ackno = unwrap_seqno(reply->ackno, sender->next_seqno);
+
         // Validate ACK number doesn't exceed what we've sent
-        if (reply->ackno > sender->next_seqno) {
+        if (abs_ackno > sender->next_seqno) {
+            printk("    [SENDER] ACK number %u exceeds next seqno %u\n", abs_ackno,
+                   sender->next_seqno);
             return;
         }
 
         // Update highest acknowledged sequence number
-        sender->acked_seqno = reply->ackno;
+        sender->acked_seqno = abs_ackno;
     }
 
     // Update window size from receiver

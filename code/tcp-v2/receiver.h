@@ -78,17 +78,16 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
         return;
     }
 
-    DEBUG_PRINT(
-        "    [REASM] First idx: %u, len: %u, Available space: %u, first_unassembled_idx: %u, "
-        "first_unacceptable_idx: %u\n",
-        first_idx, len, available_space, first_unassembled_idx, first_unacceptable_idx);
-
     // Calculate the usable portion of the segment
     const size_t first_inserted_idx = MAX(first_idx, first_unassembled_idx);
     const size_t last_inserted_idx = MIN(first_idx + len, first_unacceptable_idx);
 
-    DEBUG_PRINT("    [REASM] Inserting segment %u to %u with length %u\n", first_inserted_idx,
-                last_inserted_idx, last_inserted_idx - first_inserted_idx);
+    DEBUG_PRINT(
+        "    [REASM] Inserting segment %u to %u with length %u: first idx: %u, len: %u, available "
+        "space: %u, first_unassembled_idx: %u, "
+        "first_unacceptable_idx: %u\n",
+        first_inserted_idx, last_inserted_idx, last_inserted_idx - first_inserted_idx, first_idx,
+        len, available_space, first_unassembled_idx, first_unacceptable_idx);
 
     // Insert into reassembler if the substring is non-zero length
     if (first_inserted_idx < last_inserted_idx) {
@@ -115,10 +114,10 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
         index_to_push++;
     }
 
+    DEBUG_PRINT("    [REASM] Pushing %u bytes to the writer\n", index_to_push);
+
     // Push contiguous bytes to the writer if any exist
     if (index_to_push > 0) {
-        DEBUG_PRINT("    [REASM] Pushing %u bytes to the writer\n", index_to_push);
-
         // Write the contiguous data to the bytestream
         bs_write(&receiver->writer, receiver->reasm_buffer, index_to_push);
 
@@ -190,7 +189,9 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
     }
 
     // Calculate the stream index for the first byte
-    uint32_t first_idx = segment->seqno - 1;  // -1 to account for SYN taking up a sequence number
+    uint32_t checkpoint = bs_bytes_written(&receiver->writer);
+    uint32_t syn_offset = segment->is_syn ? 1 : 0;
+    uint32_t first_idx = syn_offset + unwrap_seqno(segment->seqno, checkpoint) - 1;
 
     // Insert the payload into the reassembler
     reasm_insert(receiver, first_idx, segment->payload, segment->len, segment->is_fin);
@@ -202,11 +203,11 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
 
     uint32_t fin_offset = bs_writer_finished(&receiver->writer) ? 1 : 0;
     uint32_t ackno = 1 + bs_bytes_written(&receiver->writer) + fin_offset;  // +1 for SYN
+    ack_response.ackno = wrap_seqno(ackno);
     receiver->next_seqno = ackno;
-    ack_response.ackno = ackno;
 
-    DEBUG_PRINT("    [RECV] Sending ACK with ackno %u and window size %u\n", ack_response.ackno,
-                ack_response.window_size);
+    DEBUG_PRINT("    [RECV] Sending ACK with ackno %u (abs %u) and window size %u\n",
+                ack_response.ackno, ackno, ack_response.window_size);
 
     return &ack_response;
 }
