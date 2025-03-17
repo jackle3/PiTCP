@@ -3,6 +3,11 @@
 #include "bytestream.h"
 #include "types.h"
 
+#define ABS(x) ((x) < 0 ? -(x) : (x))
+
+// The threshold between the received and current seqno where we'll reject the message
+#define SEQNO_REJECT_DELTA 3000
+
 /********* TYPES *********/
 
 // Receiver's maximum advertised window size
@@ -192,6 +197,30 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
     uint32_t checkpoint = bs_bytes_written(&receiver->writer);
     uint32_t syn_offset = segment->is_syn ? 1 : 0;
     uint32_t first_idx = syn_offset + unwrap_seqno(segment->seqno, checkpoint) - 1;
+
+    // === FIN VALIDATION ===
+    // Verify FIN flags to protect against corrupted packets
+    if (segment->is_fin) {
+        // Calculate sequence delta to check if this FIN is reasonable
+        int32_t seqno_delta = (int32_t)first_idx - (int32_t)checkpoint;
+
+        // Validate sequence number - FIN should not be extremely far from expected
+        if (ABS(seqno_delta) > SEQNO_REJECT_DELTA) {
+            printk(
+                "    [RECV] Ignoring suspicious FIN with distant seqno %u (expected: %u, delta: "
+                "%d)\n",
+                segment->seqno, wrap_seqno(checkpoint), seqno_delta);
+
+            return NULL;
+        }
+
+        // Add debug info for all FINs
+        printk(
+            "    [RECV] Processing FIN segment: seqno=%u (idx=%u), received=%u bytes, expected=%u "
+            "bytes\n",
+            segment->seqno, first_idx, bs_bytes_written(&receiver->writer),
+            receiver->total_size > 0 ? receiver->total_size : 0);
+    }
 
     // Insert the payload into the reassembler
     reasm_insert(receiver, first_idx, segment->payload, segment->len, segment->is_fin);

@@ -758,8 +758,8 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
                     case TCP_ESTABLISHED:
                         // Remote initiated close
                         peer->state = TCP_CLOSE_WAIT;
-                        VERBOSE_PRINT("  [TCP %x] Remote closed, in CLOSE_WAIT state\n",
-                                      peer->sender.local_addr);
+                        printk("  [TCP %x] Remote closed, in CLOSE_WAIT state\n",
+                               peer->sender.local_addr);
                         break;
 
                     case TCP_FIN_WAIT_1:
@@ -788,6 +788,21 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
         }
         // Regular data segment processing
         else {
+            // If we've already received the remote FIN and get another packet, panic
+            if (peer->state == TCP_CLOSE_WAIT) {
+                // Remote side already sent FIN but is now sending more data
+                printk("  [TCP %x] ERROR: Received data after FIN in CLOSE_WAIT state\n",
+                       peer->sender.local_addr);
+
+                // Print debug info about the unexpected packet
+                printk("    Sender Segment: seqno=%u (abs %u), len=%u\n",
+                       segment->sender_segment.seqno,
+                       unwrap_seqno(segment->sender_segment.seqno, peer->sender.next_seqno),
+                       segment->sender_segment.len);
+
+                panic("TCP protocol violation: received data after FIN");
+            }
+
             // Process with receiver
             recv_response = receiver_process_segment(&peer->receiver, &segment->sender_segment);
 
@@ -864,9 +879,11 @@ static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time
 
         tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
 
-        printk("  [TCP %x] Retransmitting segment (retry %u): seqno=%u, len=%u\n",
+        printk("  [TCP %x] Retransmitting segment (retry %u): seqno=%u (abs %u), len=%u\n",
                peer->sender.local_addr, peer->consec_retransmits + 1,
-               rtx_seg->segment.sender_segment.seqno, rtx_seg->segment.sender_segment.len);
+               rtx_seg->segment.sender_segment.seqno,
+               unwrap_seqno(rtx_seg->segment.sender_segment.seqno, peer->sender.next_seqno),
+               rtx_seg->segment.sender_segment.len);
 
         // Update retransmission timer - use exponential backoff if window is nonzero
         if (peer->sender.window_size) {

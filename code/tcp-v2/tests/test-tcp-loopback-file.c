@@ -12,6 +12,7 @@
 
 #include <string.h>
 
+#include "libc/fast-hash32.h"
 #include "nrf-test.h"
 #include "tcp.h"
 
@@ -29,7 +30,8 @@
 
 // Test data to send
 // #include "byte-array-hello.h"
-#include "byte-array-small-file.h"
+// #include "byte-array-small-file.h"
+#include "byte-array-1mb-file.h"
 
 /**
  * Helper function to print the TCP state name
@@ -183,7 +185,9 @@ static bool test_tcp_loopback(void) {
 
     // Send test message from client to server
     size_t message_len = binary_length;
+    uint32_t hash_sent = fast_hash32(binary_data, message_len);
     printk("Sending %u bytes of data from client to server...\n", message_len);
+    printk("  crc of sent data (nbytes=%u): %x\n", message_len, hash_sent);
 
     size_t bytes_written = tcp_write(&client, (uint8_t *)binary_data, message_len);
     printk("Client wrote %u/%u bytes\n", bytes_written, message_len);
@@ -236,12 +240,16 @@ static bool test_tcp_loopback(void) {
             // Print the current state of the retransmission queue
             printk("  Retransmission queue (size: %u):\n", client.segs_in_flight);
             printk("    Earliest seqno in flight: %u to %u\n",
-                   client.rtx_queue.head->segment.sender_segment.seqno,
-                   client.rtx_queue.head->segment.sender_segment.seqno +
+                   unwrap_seqno(client.rtx_queue.head->segment.sender_segment.seqno,
+                                client.sender.next_seqno),
+                   unwrap_seqno(client.rtx_queue.head->segment.sender_segment.seqno,
+                                client.sender.next_seqno) +
                        client.rtx_queue.head->segment.sender_segment.len);
             printk("    Latest seqno in flight: %u to %u\n",
-                   client.rtx_queue.tail->segment.sender_segment.seqno,
-                   client.rtx_queue.tail->segment.sender_segment.seqno +
+                   unwrap_seqno(client.rtx_queue.tail->segment.sender_segment.seqno,
+                                client.sender.next_seqno),
+                   unwrap_seqno(client.rtx_queue.tail->segment.sender_segment.seqno,
+                                client.sender.next_seqno) +
                        client.rtx_queue.tail->segment.sender_segment.len);
 
             // Print the status about the server (receiver)
@@ -282,6 +290,9 @@ static bool test_tcp_loopback(void) {
     printk("Data transfer completed successfully after %d iterations\n", iterations);
 
     receive_buffer[bytes_received] = '\0';  // Null-terminate for printing
+    uint32_t hash_received = fast_hash32(receive_buffer, bytes_received);
+    printk("  crc of received data (nbytes=%u): %x\n", bytes_received, hash_received);
+    assert(hash_received == hash_sent);
 
     printk("Server read %u bytes\n", bytes_received);
 
@@ -329,7 +340,7 @@ static bool test_tcp_loopback(void) {
         }
 
         // Log progress periodically
-        if (iterations % 5 == 0) {
+        if (iterations % 10 == 0) {
             printk("  Client FIN progress (iterations: %d):\n", iterations);
             printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
                    tcp_state_name(server.state));
@@ -437,7 +448,10 @@ static bool test_tcp_loopback(void) {
 
 void notmain(void) {
     // Initialize memory allocator
-    kmalloc_init(64);
+    uint32_t MB = 1024 * 1024;
+    uint32_t start_addr = 3 * MB;
+    uint32_t heap_size = 64 * MB;
+    kmalloc_init_set_start((void *)start_addr, heap_size);
 
     // Run the TCP loopback test
     bool test_successful = test_tcp_loopback();
