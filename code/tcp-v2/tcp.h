@@ -116,7 +116,7 @@ static inline tcp_segment_t rcp_to_tcp_segment(rcp_datagram_t *datagram) {
     tcp_segment_t segment = {0};
 
     // Check for sender-side information (SYN, FIN, or data)
-    bool has_sender_data = datagram->header.payload_len > 0 ||
+    bool has_sender_data = rcp_get_payload_len(&datagram->header) > 0 ||
                            rcp_has_flag(&datagram->header, RCP_FLAG_SYN) ||
                            rcp_has_flag(&datagram->header, RCP_FLAG_FIN);
 
@@ -129,10 +129,11 @@ static inline tcp_segment_t rcp_to_tcp_segment(rcp_datagram_t *datagram) {
         segment.sender_segment.seqno = datagram->header.seqno;
         segment.sender_segment.is_syn = rcp_has_flag(&datagram->header, RCP_FLAG_SYN);
         segment.sender_segment.is_fin = rcp_has_flag(&datagram->header, RCP_FLAG_FIN);
-        segment.sender_segment.len = datagram->header.payload_len;
+        segment.sender_segment.len = rcp_get_payload_len(&datagram->header);
 
-        if (datagram->header.payload_len > 0) {
-            memcpy(segment.sender_segment.payload, datagram->payload, datagram->header.payload_len);
+        if (rcp_get_payload_len(&datagram->header) > 0) {
+            memcpy(segment.sender_segment.payload, datagram->payload,
+                   rcp_get_payload_len(&datagram->header));
         }
     }
 
@@ -161,8 +162,8 @@ static inline rcp_datagram_t tcp_segment_to_rcp(tcp_segment_t *segment, uint8_t 
     rcp_datagram_t datagram = rcp_datagram_init();
 
     // Set addressing
-    datagram.header.src = src;
-    datagram.header.dst = dst;
+    rcp_set_src_addr(&datagram.header, src);
+    rcp_set_dst_addr(&datagram.header, dst);
 
     // Set sender information if present
     if (segment->has_sender_segment) {
