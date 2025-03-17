@@ -2,14 +2,26 @@
 
 #include "rpi.h"
 
-#define RCP_HEADER_LENGTH 11 /* RCP header length in bytes (added 1 for payload_len) */
-#define RCP_MAX_PAYLOAD 21   /* Maximum payload size to fit in 32-byte packet */
-#define RCP_TOTAL_SIZE 32    /* Total size of RCP packet (header + max payload) */
+/* Total size of RCP packet (header + max payload) */
+#define RCP_TOTAL_SIZE 32
+/* RCP header length in bytes (reduced by 1 due to combined src/dst) */
+#define RCP_HEADER_LENGTH 9 /* Reduced by 1 due to combined flags/payload_len */
+/* Maximum payload size to fit in 32-byte packet */
+#define RCP_MAX_PAYLOAD (RCP_TOTAL_SIZE - RCP_HEADER_LENGTH)
 
-/* Flag bits for the flags field */
-#define RCP_FLAG_FIN (1 << 0) /* FIN flag */
-#define RCP_FLAG_SYN (1 << 1) /* SYN flag */
-#define RCP_FLAG_ACK (1 << 2) /* ACK flag */
+/* Flag bits for the flags field (using upper 3 bits) */
+#define RCP_FLAG_FIN (1 << 5) /* FIN flag */
+#define RCP_FLAG_SYN (1 << 6) /* SYN flag */
+#define RCP_FLAG_ACK (1 << 7) /* ACK flag */
+
+/* Mask for payload length (lower 5 bits) */
+#define RCP_PAYLOAD_LEN_MASK 0x1F /* 5 bits for payload length (0-31) */
+#define RCP_FLAGS_MASK 0xE0       /* Upper 3 bits for flags */
+
+/* Address masks for combined src/dst byte */
+#define RCP_SRC_MASK 0xF0 /* Upper 4 bits for source */
+#define RCP_DST_MASK 0x0F /* Lower 4 bits for destination */
+#define RCP_SRC_SHIFT 4   /* Shift amount for source address */
 
 // #define DEBUG
 
@@ -21,25 +33,20 @@
 #endif
 
 /*
- * RCP Header Format (11 bytes total):
+ * RCP Header Format (9 bytes total):
  * Byte 0:     Checksum (1 byte)
- * Byte 1:     Destination Address (1 byte)
- * Byte 2:     Source Address (1 byte)
- * Bytes 3-4:  Sequence Number (2 bytes)
- * Byte 5:     Flags (FIN, SYN, ACK) (1 byte)
- * Bytes 6-7:  Acknowledgment Number (2 bytes)
- * Bytes 8-9:  Window Size (2 bytes)
- * Byte 10:    Payload Length (1 byte)
+ * Byte 1:     Combined Address (src in upper 4 bits, dst in lower 4 bits) (1 byte)
+ * Bytes 2-3:  Sequence Number (2 bytes)
+ * Byte 4:     Combined Flags and Payload Length (flags in upper 3 bits, length in lower 5 bits) (1
+ * byte) Bytes 5-6:  Acknowledgment Number (2 bytes) Bytes 7-8:  Window Size (2 bytes)
  */
 typedef struct rcp_header {
-    uint8_t cksum;       /* Checksum covering header and payload */
-    uint8_t dst;         /* Destination address */
-    uint8_t src;         /* Source address */
-    uint16_t seqno;      /* Sequence number */
-    uint8_t flags;       /* Control flags (FIN, SYN, ACK) */
-    uint16_t ackno;      /* Acknowledgment number */
-    uint16_t window;     /* Window size */
-    uint8_t payload_len; /* Length of the payload */
+    uint8_t cksum;     /* Checksum covering header and payload */
+    uint8_t addr;      /* Combined source and destination address */
+    uint16_t seqno;    /* Sequence number */
+    uint8_t flags_len; /* Combined flags (upper 3 bits) and payload length (lower 5 bits) */
+    uint16_t ackno;    /* Acknowledgment number */
+    uint16_t window;   /* Window size */
 } __attribute__((packed)) rcp_header_t;
 
 _Static_assert(sizeof(rcp_header_t) == RCP_HEADER_LENGTH, "RCP header size mismatch");
@@ -55,25 +62,42 @@ static inline int rcp_verify_checksum(const rcp_header_t *hdr, const uint8_t *pa
 static inline void rcp_header_parse(rcp_header_t *hdr, const void *data);
 static inline void rcp_header_serialize(const rcp_header_t *hdr, void *data);
 
-/* Helper functions for flag manipulation */
-static inline void rcp_set_flag(rcp_header_t *hdr, uint8_t flag) { hdr->flags |= flag; }
+/* Helper functions for address manipulation */
+static inline void rcp_set_src_addr(rcp_header_t *hdr, uint8_t src) {
+    hdr->addr = (hdr->addr & RCP_DST_MASK) | ((src << RCP_SRC_SHIFT) & RCP_SRC_MASK);
+}
 
-static inline void rcp_clear_flag(rcp_header_t *hdr, uint8_t flag) { hdr->flags &= ~flag; }
+static inline void rcp_set_dst_addr(rcp_header_t *hdr, uint8_t dst) {
+    hdr->addr = (hdr->addr & RCP_SRC_MASK) | (dst & RCP_DST_MASK);
+}
+
+static inline uint8_t rcp_get_src_addr(const rcp_header_t *hdr) {
+    return (hdr->addr & RCP_SRC_MASK) >> RCP_SRC_SHIFT;
+}
+
+static inline uint8_t rcp_get_dst_addr(const rcp_header_t *hdr) { return hdr->addr & RCP_DST_MASK; }
+
+/* Helper functions for flag and payload length manipulation */
+static inline void rcp_set_flag(rcp_header_t *hdr, uint8_t flag) { hdr->flags_len |= flag; }
+
+static inline void rcp_clear_flag(rcp_header_t *hdr, uint8_t flag) { hdr->flags_len &= ~flag; }
 
 static inline int rcp_has_flag(const rcp_header_t *hdr, uint8_t flag) {
-    return (hdr->flags & flag) != 0;
+    return (hdr->flags_len & flag) != 0;
+}
+
+static inline void rcp_set_payload_len(rcp_header_t *hdr, uint8_t len) {
+    // Clear the length bits and set the new length (ensuring it fits in 5 bits)
+    hdr->flags_len = (hdr->flags_len & RCP_FLAGS_MASK) | (len & RCP_PAYLOAD_LEN_MASK);
+}
+
+static inline uint8_t rcp_get_payload_len(const rcp_header_t *hdr) {
+    return hdr->flags_len & RCP_PAYLOAD_LEN_MASK;
 }
 
 /* Initialize RCP header with default values */
 static inline rcp_header_t rcp_header_init(void) {
-    rcp_header_t hdr = {.cksum = 0,
-                        .dst = 0,
-                        .src = 0,
-                        .seqno = 0,
-                        .flags = 0,
-                        .ackno = 0,
-                        .window = 0,
-                        .payload_len = 0};
+    rcp_header_t hdr = {.cksum = 0, .addr = 0, .seqno = 0, .flags_len = 0, .ackno = 0, .window = 0};
     return hdr;
 }
 
@@ -188,23 +212,21 @@ static inline void rcp_header_parse(rcp_header_t *hdr, const void *data) {
     DEBUG_PRINT("\n");
 
     hdr->cksum = bytes[0];
-    hdr->dst = bytes[1];
-    hdr->src = bytes[2];
-    hdr->seqno = (bytes[3] << 8) | bytes[4];
-    hdr->flags = bytes[5];
-    hdr->ackno = (bytes[6] << 8) | bytes[7];
-    hdr->window = (bytes[8] << 8) | bytes[9];
-    hdr->payload_len = bytes[10];
+    hdr->addr = bytes[1];
+    hdr->seqno = (bytes[2] << 8) | bytes[3];
+    hdr->flags_len = bytes[4];
+    hdr->ackno = (bytes[5] << 8) | bytes[6];
+    hdr->window = (bytes[7] << 8) | bytes[8];
 
     DEBUG_PRINT("    [RCP] parsed header\n");
-    DEBUG_PRINT("      - src: %u\n", hdr->src);
-    DEBUG_PRINT("      - dst: %u\n", hdr->dst);
+    DEBUG_PRINT("      - src: %u\n", rcp_get_src_addr(hdr));
+    DEBUG_PRINT("      - dst: %u\n", rcp_get_dst_addr(hdr));
     DEBUG_PRINT("      - seqno: %u\n", hdr->seqno);
     DEBUG_PRINT("      - ackno: %u\n", hdr->ackno);
     DEBUG_PRINT("      - syn: %u\n", rcp_has_flag(hdr, RCP_FLAG_SYN));
     DEBUG_PRINT("      - ack: %u\n", rcp_has_flag(hdr, RCP_FLAG_ACK));
     DEBUG_PRINT("      - fin: %u\n", rcp_has_flag(hdr, RCP_FLAG_FIN));
-    DEBUG_PRINT("      - payload_len: %u\n", hdr->payload_len);
+    DEBUG_PRINT("      - payload_len: %u\n", rcp_get_payload_len(hdr));
 }
 
 /* Serialize an RCP header structure into network data */
@@ -214,28 +236,26 @@ static inline void rcp_header_serialize(const rcp_header_t *hdr, void *data) {
     }
 
     DEBUG_PRINT("    [RCP] serializing header\n");
-    DEBUG_PRINT("      - src: %u\n", hdr->src);
-    DEBUG_PRINT("      - dst: %u\n", hdr->dst);
+    DEBUG_PRINT("      - src: %u\n", rcp_get_src_addr(hdr));
+    DEBUG_PRINT("      - dst: %u\n", rcp_get_dst_addr(hdr));
     DEBUG_PRINT("      - seqno: %u\n", hdr->seqno);
     DEBUG_PRINT("      - ackno: %u\n", hdr->ackno);
     DEBUG_PRINT("      - syn: %u\n", rcp_has_flag(hdr, RCP_FLAG_SYN));
     DEBUG_PRINT("      - ack: %u\n", rcp_has_flag(hdr, RCP_FLAG_ACK));
     DEBUG_PRINT("      - fin: %u\n", rcp_has_flag(hdr, RCP_FLAG_FIN));
-    DEBUG_PRINT("      - payload_len: %u\n", hdr->payload_len);
+    DEBUG_PRINT("      - payload_len: %u\n", rcp_get_payload_len(hdr));
 
     uint8_t *bytes = (uint8_t *)data;
 
     bytes[0] = hdr->cksum;
-    bytes[1] = hdr->dst;
-    bytes[2] = hdr->src;
-    bytes[3] = (hdr->seqno >> 8) & 0xFF;
-    bytes[4] = hdr->seqno & 0xFF;
-    bytes[5] = hdr->flags;
-    bytes[6] = (hdr->ackno >> 8) & 0xFF;
-    bytes[7] = hdr->ackno & 0xFF;
-    bytes[8] = (hdr->window >> 8) & 0xFF;
-    bytes[9] = hdr->window & 0xFF;
-    bytes[10] = hdr->payload_len;
+    bytes[1] = hdr->addr;
+    bytes[2] = (hdr->seqno >> 8) & 0xFF;
+    bytes[3] = hdr->seqno & 0xFF;
+    bytes[4] = hdr->flags_len;
+    bytes[5] = (hdr->ackno >> 8) & 0xFF;
+    bytes[6] = hdr->ackno & 0xFF;
+    bytes[7] = (hdr->window >> 8) & 0xFF;
+    bytes[8] = hdr->window & 0xFF;
 
     DEBUG_PRINT("    [RCP] serialized header bytes: ");
     for (size_t i = 0; i < RCP_HEADER_LENGTH; i++) {

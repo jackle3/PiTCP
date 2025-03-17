@@ -12,6 +12,7 @@
 
 #include <string.h>
 
+#include "libc/fast-hash32.h"
 #include "nrf-test.h"
 #include "tcp.h"
 
@@ -29,7 +30,8 @@
 
 // Test data to send
 // #include "byte-array-hello.h"
-#include "byte-array-small-file.h"
+// #include "byte-array-small-file.h"
+#include "byte-array-1mb-file.h"
 
 /**
  * Helper function to print the TCP state name
@@ -70,7 +72,7 @@ static void run_ticks(tcp_peer_t *client, tcp_peer_t *server, int count) {
     for (int i = 0; i < count; i++) {
         tcp_tick(client);
         tcp_tick(server);
-        delay_ms(TICK_DELAY_MS);
+        // delay_ms(TICK_DELAY_MS);
     }
 }
 
@@ -168,6 +170,14 @@ static bool test_tcp_loopback(void) {
     printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
            tcp_state_name(server.state));
 
+    // Print TCP statistics after connection establishment
+    printk("\n=== TCP Statistics after Connection Establishment ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
+
     //---------------------------------------------------------------------
     // Phase 2: Data transfer
     //---------------------------------------------------------------------
@@ -175,7 +185,9 @@ static bool test_tcp_loopback(void) {
 
     // Send test message from client to server
     size_t message_len = binary_length;
+    uint32_t hash_sent = fast_hash32(binary_data, message_len);
     printk("Sending %u bytes of data from client to server...\n", message_len);
+    printk("  crc of sent data (nbytes=%u): %x\n", message_len, hash_sent);
 
     size_t bytes_written = tcp_write(&client, (uint8_t *)binary_data, message_len);
     printk("Client wrote %u/%u bytes\n", bytes_written, message_len);
@@ -228,12 +240,16 @@ static bool test_tcp_loopback(void) {
             // Print the current state of the retransmission queue
             printk("  Retransmission queue (size: %u):\n", client.segs_in_flight);
             printk("    Earliest seqno in flight: %u to %u\n",
-                   client.rtx_queue.head->segment.sender_segment.seqno,
-                   client.rtx_queue.head->segment.sender_segment.seqno +
+                   unwrap_seqno(client.rtx_queue.head->segment.sender_segment.seqno,
+                                client.sender.next_seqno),
+                   unwrap_seqno(client.rtx_queue.head->segment.sender_segment.seqno,
+                                client.sender.next_seqno) +
                        client.rtx_queue.head->segment.sender_segment.len);
             printk("    Latest seqno in flight: %u to %u\n",
-                   client.rtx_queue.tail->segment.sender_segment.seqno,
-                   client.rtx_queue.tail->segment.sender_segment.seqno +
+                   unwrap_seqno(client.rtx_queue.tail->segment.sender_segment.seqno,
+                                client.sender.next_seqno),
+                   unwrap_seqno(client.rtx_queue.tail->segment.sender_segment.seqno,
+                                client.sender.next_seqno) +
                        client.rtx_queue.tail->segment.sender_segment.len);
 
             // Print the status about the server (receiver)
@@ -261,6 +277,7 @@ static bool test_tcp_loopback(void) {
     printk("  Next seqno: %u\n", server.receiver.next_seqno);
     printk("  Window size: %u\n", server.receiver.window_size);
     printk("  Total size: %u\n", server.receiver.total_size);
+    printk("  Fin received: %d\n", server.receiver.fin_received);
     printk("\n");
 
     // Check if data transfer completed
@@ -273,6 +290,9 @@ static bool test_tcp_loopback(void) {
     printk("Data transfer completed successfully after %d iterations\n", iterations);
 
     receive_buffer[bytes_received] = '\0';  // Null-terminate for printing
+    uint32_t hash_received = fast_hash32(receive_buffer, bytes_received);
+    printk("  crc of received data (nbytes=%u): %x\n", bytes_received, hash_received);
+    assert(hash_received == hash_sent);
 
     printk("Server read %u bytes\n", bytes_received);
 
@@ -287,6 +307,14 @@ static bool test_tcp_loopback(void) {
         printk("Expected %u bytes, received %u bytes\n", message_len, bytes_received);
         return false;
     }
+
+    // Print TCP statistics after data transfer
+    printk("\n=== TCP Statistics after Data Transfer ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
 
     //---------------------------------------------------------------------
     // Phase 3: Connection termination (FIN handshake)
@@ -312,7 +340,7 @@ static bool test_tcp_loopback(void) {
         }
 
         // Log progress periodically
-        if (iterations % 5 == 0) {
+        if (iterations % 10 == 0) {
             printk("  Client FIN progress (iterations: %d):\n", iterations);
             printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
                    tcp_state_name(server.state));
@@ -371,6 +399,14 @@ static bool test_tcp_loopback(void) {
                tcp_state_name(server.state));
     }
 
+    // Print TCP statistics after connection termination
+    printk("\n=== TCP Statistics after Connection Termination ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
+
     // Clean up resources
     tcp_cleanup(&client);
     tcp_cleanup(&server);
@@ -393,6 +429,14 @@ static bool test_tcp_loopback(void) {
     printk("    Fin received: %d\n", server.receiver.fin_received);
     printk("\n");
 
+    // Print TCP statistics
+    printk("\n=== TCP Connection Statistics ===\n");
+    printk("Client TCP Stats:\n");
+    tcp_print_stats(&client);
+
+    printk("\nServer TCP Stats:\n");
+    tcp_print_stats(&server);
+
     // Print NRF statistics
     nrf_stat_print(client_nrf, "Client NRF stats");
     nrf_stat_print(server_nrf, "Server NRF stats");
@@ -404,7 +448,10 @@ static bool test_tcp_loopback(void) {
 
 void notmain(void) {
     // Initialize memory allocator
-    kmalloc_init(64);
+    uint32_t MB = 1024 * 1024;
+    uint32_t start_addr = 3 * MB;
+    uint32_t heap_size = 64 * MB;
+    kmalloc_init_set_start((void *)start_addr, heap_size);
 
     // Run the TCP loopback test
     bool test_successful = test_tcp_loopback();

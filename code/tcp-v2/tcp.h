@@ -21,6 +21,37 @@
 #define RTO_INITIAL_US S_TO_US(1)
 #define TIME_WAIT_DURATION_US S_TO_US(2) /* 2-second TIME_WAIT */
 
+/* TCP statistics structure */
+typedef struct tcp_stats {
+    /* Segments */
+    uint32_t segments_sent;      /* Total segments sent */
+    uint32_t data_segments_sent; /* Data segments sent */
+    uint32_t syn_segments_sent;  /* SYN segments sent */
+    uint32_t fin_segments_sent;  /* FIN segments sent */
+    uint32_t ack_segments_sent;  /* ACK segments sent */
+
+    uint32_t segments_received;      /* Total segments received */
+    uint32_t data_segments_received; /* Data segments received */
+    uint32_t syn_segments_received;  /* SYN segments received */
+    uint32_t fin_segments_received;  /* FIN segments received */
+    uint32_t ack_segments_received;  /* ACK segments received */
+
+    /* Retransmissions */
+    uint32_t retransmits;           /* Total retransmitted segments */
+    uint32_t dup_acks_received;     /* Duplicate ACKs received */
+    uint32_t out_of_order_received; /* Out-of-order segments received */
+
+    /* Throughput */
+    uint32_t bytes_sent;          /* Total bytes sent */
+    uint32_t bytes_received;      /* Total bytes received */
+    uint32_t bytes_retransmitted; /* Total bytes retransmitted */
+
+    /* Timers */
+    uint32_t connection_start_time_us; /* When connection was established */
+    uint32_t last_send_time_us;        /* Last time a segment was sent */
+    uint32_t last_recv_time_us;        /* Last time a segment was received */
+} tcp_stats_t;
+
 /* TCP connection states for proper handshake tracking */
 typedef enum tcp_state {
     TCP_CLOSED,       /* No connection */
@@ -91,7 +122,8 @@ typedef struct tcp_peer {
     nrf_t *nrf;                        /* NRF interface for sending/receiving */
     tcp_send_callback_t send_callback; /* Callback for sending segments */
 
-    tcp_state_t state; /* Current TCP connection state */
+    tcp_state_t state;        /* Current TCP connection state */
+    uint32_t timeout_time_us; /* Timeout for current state (e.g., TIME_WAIT timer) */
 
     tcp_rtx_queue_t rtx_queue;  /* Queue of segments that need acknowledgment */
     uint32_t segs_in_flight;    /* Number of segments in flight */
@@ -99,8 +131,148 @@ typedef struct tcp_peer {
     uint32_t rto_us;            /* Next time to retransmit - when time >= rto_us, retransmit */
     int16_t consec_retransmits; /* Number of consecutive retransmits */
 
-    uint32_t timeout_time_us; /* Timeout for current state (e.g., TIME_WAIT timer) */
+    tcp_stats_t stats; /* Statistics for the TCP connection */
 } tcp_peer_t;
+
+/********* STATISTICS TRACKING *********/
+
+/**
+ * Initialize the TCP statistics structure
+ *
+ * @return Initialized TCP statistics structure with zeroed values
+ */
+static inline tcp_stats_t tcp_stats_init(void) {
+    tcp_stats_t stats = {0};
+    stats.connection_start_time_us = timer_get_usec();
+    stats.last_send_time_us = stats.connection_start_time_us;
+    stats.last_recv_time_us = stats.connection_start_time_us;
+    return stats;
+}
+
+/**
+ * Update TCP statistics when sending a segment
+ *
+ * @param peer The TCP peer
+ * @param segment The segment being sent
+ */
+static inline void tcp_update_send_stats(tcp_peer_t *peer, tcp_segment_t *segment) {
+    peer->stats.segments_sent++;
+    peer->stats.last_send_time_us = timer_get_usec();
+
+    if (segment->has_sender_segment) {
+        if (segment->sender_segment.len > 0) {
+            peer->stats.data_segments_sent++;
+            peer->stats.bytes_sent += segment->sender_segment.len;
+        }
+        if (segment->sender_segment.is_syn) {
+            peer->stats.syn_segments_sent++;
+        }
+        if (segment->sender_segment.is_fin) {
+            peer->stats.fin_segments_sent++;
+        }
+    }
+
+    if (segment->has_receiver_segment && segment->receiver_segment.is_ack) {
+        peer->stats.ack_segments_sent++;
+    }
+}
+
+/**
+ * Update TCP statistics when receiving a segment
+ *
+ * @param peer The TCP peer
+ * @param segment The segment received
+ */
+static inline void tcp_update_receive_stats(tcp_peer_t *peer, tcp_segment_t *segment) {
+    peer->stats.segments_received++;
+    peer->stats.last_recv_time_us = timer_get_usec();
+
+    if (segment->has_sender_segment) {
+        if (segment->sender_segment.len > 0) {
+            peer->stats.data_segments_received++;
+            peer->stats.bytes_received += segment->sender_segment.len;
+        }
+        if (segment->sender_segment.is_syn) {
+            peer->stats.syn_segments_received++;
+        }
+        if (segment->sender_segment.is_fin) {
+            peer->stats.fin_segments_received++;
+        }
+    }
+
+    if (segment->has_receiver_segment && segment->receiver_segment.is_ack) {
+        peer->stats.ack_segments_received++;
+    }
+}
+
+/**
+ * Update TCP statistics for retransmissions
+ *
+ * @param peer The TCP peer
+ * @param segment The segment being retransmitted
+ */
+static inline void tcp_update_retransmit_stats(tcp_peer_t *peer, tcp_segment_t *segment) {
+    peer->stats.retransmits++;
+
+    if (segment->has_sender_segment && segment->sender_segment.len > 0) {
+        peer->stats.bytes_retransmitted += segment->sender_segment.len;
+    }
+}
+
+/**
+ * Calculate current send throughput in bytes per second
+ *
+ * @param peer The TCP peer
+ * @return Current throughput in bytes per second
+ */
+static inline size_t tcp_calculate_throughput(tcp_peer_t *peer) {
+    uint32_t now_us = timer_get_usec();
+    uint32_t elapsed_us = now_us - peer->stats.connection_start_time_us;
+
+    if (elapsed_us == 0) {
+        return 0;
+    }
+
+    return peer->stats.bytes_sent / (elapsed_us / 1000000);
+}
+
+/**
+ * Print TCP connection statistics
+ *
+ * @param peer The TCP peer
+ */
+static inline void tcp_print_stats(tcp_peer_t *peer) {
+    printk("===== TCP Connection Statistics =====\n");
+    printk("Connection State: %s\n", tcp_state_to_string(peer->state));
+    printk("Connection Duration: %u seconds\n",
+           (timer_get_usec() - peer->stats.connection_start_time_us) / 1000000);
+
+    printk("\n--- Segments ---\n");
+    printk("Segments Sent: %u (Data: %u, SYN: %u, FIN: %u, ACK: %u)\n", peer->stats.segments_sent,
+           peer->stats.data_segments_sent, peer->stats.syn_segments_sent,
+           peer->stats.fin_segments_sent, peer->stats.ack_segments_sent);
+
+    printk("Segments Received: %u (Data: %u, SYN: %u, FIN: %u, ACK: %u)\n",
+           peer->stats.segments_received, peer->stats.data_segments_received,
+           peer->stats.syn_segments_received, peer->stats.fin_segments_received,
+           peer->stats.ack_segments_received);
+
+    printk("\n--- Retransmissions ---\n");
+    printk("Retransmitted Segments: %u\n", peer->stats.retransmits);
+    printk("Current Segments in Flight: %u\n", peer->segs_in_flight);
+
+    printk("\n--- Throughput ---\n");
+    printk("Bytes Sent: %u\n", peer->stats.bytes_sent);
+    printk("Bytes Received: %u\n", peer->stats.bytes_received);
+    printk("Bytes Retransmitted: %u\n", peer->stats.bytes_retransmitted);
+    printk("Send Throughput: %u bytes/sec\n", tcp_calculate_throughput(peer));
+
+    printk("\n--- Window Information ---\n");
+    printk("Send Window Size: %u\n", peer->sender.window_size);
+    printk("Receive Window Size: %u\n", peer->receiver.window_size);
+
+    printk("===================================\n");
+}
 
 /********* HELPER FUNCTIONS *********/
 
@@ -116,7 +288,7 @@ static inline tcp_segment_t rcp_to_tcp_segment(rcp_datagram_t *datagram) {
     tcp_segment_t segment = {0};
 
     // Check for sender-side information (SYN, FIN, or data)
-    bool has_sender_data = datagram->header.payload_len > 0 ||
+    bool has_sender_data = rcp_get_payload_len(&datagram->header) > 0 ||
                            rcp_has_flag(&datagram->header, RCP_FLAG_SYN) ||
                            rcp_has_flag(&datagram->header, RCP_FLAG_FIN);
 
@@ -129,10 +301,11 @@ static inline tcp_segment_t rcp_to_tcp_segment(rcp_datagram_t *datagram) {
         segment.sender_segment.seqno = datagram->header.seqno;
         segment.sender_segment.is_syn = rcp_has_flag(&datagram->header, RCP_FLAG_SYN);
         segment.sender_segment.is_fin = rcp_has_flag(&datagram->header, RCP_FLAG_FIN);
-        segment.sender_segment.len = datagram->header.payload_len;
+        segment.sender_segment.len = rcp_get_payload_len(&datagram->header);
 
-        if (datagram->header.payload_len > 0) {
-            memcpy(segment.sender_segment.payload, datagram->payload, datagram->header.payload_len);
+        if (rcp_get_payload_len(&datagram->header) > 0) {
+            memcpy(segment.sender_segment.payload, datagram->payload,
+                   rcp_get_payload_len(&datagram->header));
         }
     }
 
@@ -161,8 +334,8 @@ static inline rcp_datagram_t tcp_segment_to_rcp(tcp_segment_t *segment, uint8_t 
     rcp_datagram_t datagram = rcp_datagram_init();
 
     // Set addressing
-    datagram.header.src = src;
-    datagram.header.dst = dst;
+    rcp_set_src_addr(&datagram.header, src);
+    rcp_set_dst_addr(&datagram.header, dst);
 
     // Set sender information if present
     if (segment->has_sender_segment) {
@@ -240,7 +413,8 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t r
                        .initial_RTO_us = RTO_INITIAL_US,
                        .rto_us = 0,
                        .consec_retransmits = -1, /* Initialize to -1 to indicate not started */
-                       .timeout_time_us = 0};
+                       .timeout_time_us = 0,
+                       .stats = tcp_stats_init()}; /* Initialize stats */
 
     // Initialize retransmission queue
     tcp_rtx_init(&peer.rtx_queue);
@@ -272,6 +446,9 @@ static inline void tcp_set_send_callback(tcp_peer_t *peer, tcp_send_callback_t c
 static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bool needs_ack) {
     assert(peer);
     assert(segment);
+
+    // Update send statistics
+    tcp_update_send_stats(peer, segment);
 
     // Convert TCP segment to RCP datagram
     rcp_datagram_t datagram =
@@ -365,6 +542,9 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
 static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment) {
     assert(peer);
     assert(segment);
+
+    // Update receive statistics
+    tcp_update_receive_stats(peer, segment);
 
     DEBUG_PRINT(" [TCP] RCP %u: Processing received segment in state %s\n", peer->sender.local_addr,
                 tcp_state_to_string(peer->state));
@@ -578,8 +758,8 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
                     case TCP_ESTABLISHED:
                         // Remote initiated close
                         peer->state = TCP_CLOSE_WAIT;
-                        VERBOSE_PRINT("  [TCP %x] Remote closed, in CLOSE_WAIT state\n",
-                                      peer->sender.local_addr);
+                        printk("  [TCP %x] Remote closed, in CLOSE_WAIT state\n",
+                               peer->sender.local_addr);
                         break;
 
                     case TCP_FIN_WAIT_1:
@@ -608,6 +788,21 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
         }
         // Regular data segment processing
         else {
+            // If we've already received the remote FIN and get another packet, panic
+            if (peer->state == TCP_CLOSE_WAIT) {
+                // Remote side already sent FIN but is now sending more data
+                printk("  [TCP %x] ERROR: Received data after FIN in CLOSE_WAIT state\n",
+                       peer->sender.local_addr);
+
+                // Print debug info about the unexpected packet
+                printk("    Sender Segment: seqno=%u (abs %u), len=%u\n",
+                       segment->sender_segment.seqno,
+                       unwrap_seqno(segment->sender_segment.seqno, peer->sender.next_seqno),
+                       segment->sender_segment.len);
+
+                panic("TCP protocol violation: received data after FIN");
+            }
+
             // Process with receiver
             recv_response = receiver_process_segment(&peer->receiver, &segment->sender_segment);
 
@@ -678,11 +873,17 @@ static inline void tcp_check_retransmits(tcp_peer_t *peer, uint32_t current_time
     if (time_since_rto >= 0) {
         // Send the oldest unacknowledged segment
         unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
+
+        // Update retransmission statistics
+        tcp_update_retransmit_stats(peer, &rtx_seg->segment);
+
         tcp_send_segment(peer, &rtx_seg->segment, false);  // Don't add to queue again
 
-        printk("  [TCP %x] Retransmitting segment (retry %u): seqno=%u, len=%u\n",
+        printk("  [TCP %x] Retransmitting segment (retry %u): seqno=%u (abs %u), len=%u\n",
                peer->sender.local_addr, peer->consec_retransmits + 1,
-               rtx_seg->segment.sender_segment.seqno, rtx_seg->segment.sender_segment.len);
+               rtx_seg->segment.sender_segment.seqno,
+               unwrap_seqno(rtx_seg->segment.sender_segment.seqno, peer->sender.next_seqno),
+               rtx_seg->segment.sender_segment.len);
 
         // Update retransmission timer - use exponential backoff if window is nonzero
         if (peer->sender.window_size) {
