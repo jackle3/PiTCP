@@ -151,18 +151,12 @@ static inline tcp_segment_t rcp_to_tcp_segment(rcp_datagram_t *datagram) {
  * Convert a TCP segment to an RCP datagram
  *
  * @param segment Pointer to the TCP segment to convert
- * @param src Source RCP address
- * @param dst Destination RCP address
  * @return An RCP datagram containing the converted data
  */
-static inline rcp_datagram_t tcp_segment_to_rcp(tcp_segment_t *segment, uint8_t src, uint8_t dst) {
+static inline rcp_datagram_t tcp_segment_to_rcp(tcp_segment_t *segment) {
     assert(segment);
 
     rcp_datagram_t datagram = rcp_datagram_init();
-
-    // Set addressing
-    datagram.header.src = src;
-    datagram.header.dst = dst;
 
     // Set sender information if present
     if (segment->has_sender_segment) {
@@ -274,8 +268,7 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
     assert(segment);
 
     // Convert TCP segment to RCP datagram
-    rcp_datagram_t datagram =
-        tcp_segment_to_rcp(segment, peer->sender.local_addr, peer->sender.remote_addr);
+    rcp_datagram_t datagram = tcp_segment_to_rcp(segment);
 
     // Serialize the datagram
     uint8_t buffer[RCP_TOTAL_SIZE];
