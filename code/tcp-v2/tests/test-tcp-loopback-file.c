@@ -225,24 +225,22 @@ static bool test_tcp_loopback(void) {
             printk("  Next seqno: %u\n", client.sender.next_seqno);
             printk("  Acked seqno: %u\n", client.sender.acked_seqno);
             printk("  Window size: %u\n", client.sender.window_size);
-            printk("  Space available: %u\n", tcp_space_available(&client));
+            // Print the current state of the retransmission queue
+            printk("  Retransmission queue (size: %u):\n", client.segs_in_flight);
+            printk("    Earliest seqno in flight: %u to %u\n",
+                   client.rtx_queue.head->segment.sender_segment.seqno,
+                   client.rtx_queue.head->segment.sender_segment.seqno +
+                       client.rtx_queue.head->segment.sender_segment.len);
+            printk("    Latest seqno in flight: %u to %u\n",
+                   client.rtx_queue.tail->segment.sender_segment.seqno,
+                   client.rtx_queue.tail->segment.sender_segment.seqno +
+                       client.rtx_queue.tail->segment.sender_segment.len);
 
             // Print the status about the server (receiver)
             printk("Server (receiver) status:\n");
             printk("  Next seqno: %u\n", server.receiver.next_seqno);
+            printk("  Latest seqno in reasm: %u\n", server.receiver.latest_seqno_in_reasm);
             printk("  Window size: %u\n", server.receiver.window_size);
-            printk("  Bytes available: %u\n", tcp_bytes_available(&server));
-
-            // Print the current state of the retransmission queue
-            printk("Retransmission queue (size: %u):\n", client.segs_in_flight);
-            printk("  Earliest seqno in flight: %u to %u\n",
-                   client.rtx_queue.head->segment.sender_segment.seqno,
-                   client.rtx_queue.head->segment.sender_segment.seqno +
-                       client.rtx_queue.head->segment.sender_segment.len);
-            printk("  Latest seqno in flight: %u to %u\n",
-                   client.rtx_queue.tail->segment.sender_segment.seqno,
-                   client.rtx_queue.tail->segment.sender_segment.seqno +
-                       client.rtx_queue.tail->segment.sender_segment.len);
         }
     }
 
