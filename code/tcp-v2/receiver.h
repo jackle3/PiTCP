@@ -6,7 +6,7 @@
 /********* TYPES *********/
 
 // Receiver's maximum advertised window size
-#define MAX_WINDOW_SIZE 64
+#define MAX_WINDOW_SIZE 1024
 
 /* Receiver state structure */
 typedef struct receiver {
