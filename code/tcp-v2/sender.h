@@ -39,6 +39,15 @@ static inline sender_t sender_init(uint8_t local_addr, uint8_t remote_addr) {
     return sender;
 }
 
+static inline size_t segment_length(sender_segment_t *segment, size_t payload_len) {
+    size_t len = payload_len;
+    if (segment->is_syn)
+        len++;
+    if (segment->is_fin)
+        len++;
+    return len;
+}
+
 /**
  * Create a segment to be sent
  *
@@ -58,15 +67,15 @@ static inline sender_segment_t make_segment(sender_t *sender, size_t len) {
 
     // Determine how many bytes to send (limit by max payload and requested length)
     size_t bytes_to_send = MIN(RCP_MAX_PAYLOAD, len);
+    size_t payload_len = 0;
     if (bytes_to_send > 0) {
-        // Read data from bytestream into segment payload
-        seg.len = bs_read(&sender->reader, seg.payload, bytes_to_send);
+        // Read as much data as possible from bytestream into segment payload
+        payload_len = bs_read(&sender->reader, seg.payload, bytes_to_send);
     }
 
     // Check if this is the FIN segment
-    seg.is_fin =
-        bs_reader_finished(&sender->reader) && (bytes_to_send == 0 || seg.len < bytes_to_send);
-
+    seg.is_fin = bs_reader_finished(&sender->reader);
+    seg.len = segment_length(&seg, payload_len);
     return seg;
 }
 
@@ -82,19 +91,14 @@ static inline bool sender_segment_sent(sender_t *sender, sender_segment_t *segme
     assert(segment);
 
     // Only update sequence number for segments with data, SYN, or FIN
-    if (segment->len > 0 || segment->is_syn || segment->is_fin) {
+    if (segment->len > 0) {
         // Unwrap the segment's sequence number to compare with next_seqno
         uint32_t abs_seqno = unwrap_seqno(segment->seqno, sender->next_seqno);
 
         // Only update if the segment is in the future (seqno is past what we've sent)
         if (abs_seqno >= sender->next_seqno) {
-            // Update next sequence number
+            // Update next sequence number (note that len includes SYN/FIN in it)
             sender->next_seqno = abs_seqno + segment->len;
-
-            // SYN and FIN take up one sequence number each
-            if (segment->is_syn || segment->is_fin) {
-                sender->next_seqno++;
-            }
         }
     }
 
@@ -169,21 +173,13 @@ static inline sender_segment_t *sender_generate_segment(sender_t *sender) {
         return NULL;
     }
 
-    // Send data if available in the bytestream
-    if (bs_bytes_available(&sender->reader)) {
-        uint32_t remaining_space = receiver_max_seqno - sender->next_seqno;
-        next_segment = make_segment(sender, remaining_space);
-        return &next_segment;
-    } else if (bs_reader_finished(&sender->reader)) {
-        // If bytestream is finished and we haven't sent FIN yet, send it
-        next_segment.seqno = sender->next_seqno;
-        next_segment.is_syn = false;
-        next_segment.is_fin = true;
-        next_segment.len = 0;
-        return &next_segment;
+    // Otherwise, just send as much data as possible
+    uint32_t remaining_space = receiver_max_seqno - sender->next_seqno;
+    next_segment = make_segment(sender, remaining_space);
+    if (next_segment.len == 0) {
+        return NULL;
     }
-
-    return NULL;
+    return &next_segment;
 }
 
 /**

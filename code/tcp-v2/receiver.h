@@ -70,6 +70,7 @@ static inline void reasm_insert(receiver_t *receiver, size_t first_idx, char *da
     if (is_last) {
         receiver->total_size = first_idx + len;
         receiver->fin_received = true;
+        printk("    [REASM] Received FIN segment: first_idx %u, len %u\n", first_idx, len);
     }
 
     const size_t available_space = bs_remaining_capacity(&receiver->writer);
@@ -215,15 +216,17 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
         }
 
         // Add debug info for all FINs
-        printk(
-            "    [RECV] Processing FIN segment: seqno=%u (idx=%u), received=%u bytes, expected=%u "
-            "bytes\n",
-            segment->seqno, first_idx, bs_bytes_written(&receiver->writer),
-            receiver->total_size > 0 ? receiver->total_size : 0);
+        printk("    [RECV] Processing FIN segment: seqno=%u (idx=%u), received=%u bytes\n",
+               segment->seqno, first_idx, bs_bytes_written(&receiver->writer));
     }
 
     // Insert the payload into the reassembler
-    reasm_insert(receiver, first_idx, segment->payload, segment->len, segment->is_fin);
+    size_t payload_len = segment->len;
+    if (segment->is_syn)
+        payload_len--;
+    if (segment->is_fin)
+        payload_len--;
+    reasm_insert(receiver, first_idx, segment->payload, payload_len, segment->is_fin);
 
     // Create and return the ACK response
     static receiver_segment_t ack_response = {0};
@@ -235,8 +238,9 @@ static inline receiver_segment_t *receiver_process_segment(receiver_t *receiver,
     ack_response.ackno = wrap_seqno(ackno);
     receiver->next_seqno = ackno;
 
-    DEBUG_PRINT("    [RECV] Sending ACK with ackno %u (abs %u) and window size %u\n",
-                ack_response.ackno, ackno, ack_response.window_size);
+    DEBUG_PRINT("    [RECV] Sending ACK: ackno %u (abs %u), window size %u, bytes_written %u\n",
+                ack_response.ackno, ackno, ack_response.window_size,
+                bs_bytes_written(&receiver->writer));
 
     return &ack_response;
 }

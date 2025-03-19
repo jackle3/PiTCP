@@ -4,10 +4,8 @@
  * Tests the TCP implementation by creating a loopback connection
  * where a client and server communicate on the same Pi.
  *
- * The test verifies:
- * 1. Connection establishment (SYN handshake)
- * 2. Data transfer
- * 3. Connection termination (FIN handshake)
+ * This test treats TCP as a unified bytestream, where SYN and FIN
+ * are simply part of the normal data flow rather than separate phases.
  */
 
 #include <string.h>
@@ -25,45 +23,13 @@
 #define SERVER_NRF_ADDR server_addr
 
 // Test parameters
-#define TIME_WAIT_ITERATIONS 1000  // Maximum iterations for TIME_WAIT
-#define TICK_DELAY_MS 10           // Delay between ticks in milliseconds
+#define MAX_ITERATIONS 2000
+#define TICK_DELAY_MS 10  // Delay between ticks in milliseconds
 
 // Test data to send
 // #include "byte-array-hello.h"
 // #include "byte-array-small-file.h"
 #include "byte-array-1mb-file.h"
-
-/**
- * Helper function to print the TCP state name
- */
-static const char *tcp_state_name(tcp_state_t state) {
-    switch (state) {
-        case TCP_CLOSED:
-            return "CLOSED";
-        case TCP_LISTEN:
-            return "LISTEN";
-        case TCP_SYN_SENT:
-            return "SYN_SENT";
-        case TCP_SYN_RECEIVED:
-            return "SYN_RECEIVED";
-        case TCP_ESTABLISHED:
-            return "ESTABLISHED";
-        case TCP_FIN_WAIT_1:
-            return "FIN_WAIT_1";
-        case TCP_FIN_WAIT_2:
-            return "FIN_WAIT_2";
-        case TCP_CLOSE_WAIT:
-            return "CLOSE_WAIT";
-        case TCP_CLOSING:
-            return "CLOSING";
-        case TCP_LAST_ACK:
-            return "LAST_ACK";
-        case TCP_TIME_WAIT:
-            return "TIME_WAIT";
-        default:
-            return "UNKNOWN";
-    }
-}
 
 /**
  * Helper function to run ticks on both TCP peers
@@ -88,10 +54,96 @@ static void setup_routing_table(void) {
 }
 
 /**
+ * Print connection progress
+ */
+static void print_connection_progress(tcp_peer_t *client, tcp_peer_t *server, size_t bytes_written,
+                                      size_t bytes_received, size_t message_len, int iterations) {
+    printk("\nConnection progress (iterations: %d):\n", iterations);
+    printk("  [CLIENT] Written: %u/%u bytes | [SERVER] Received: %u/%u bytes\n", bytes_written,
+           message_len, bytes_received, message_len);
+
+    // Client status
+    printk("[CLIENT] Sender: seqno=%u, acked=%u, window=%u, in_flight=%u\n",
+           client->sender.next_seqno, client->sender.acked_seqno, client->sender.window_size,
+           client->segs_in_flight);
+
+    if (client->segs_in_flight > 0) {
+        printk("  First in flight: %u-%u",
+               unwrap_seqno(client->rtx_queue.head->segment.sender_segment.seqno,
+                            client->sender.next_seqno),
+               unwrap_seqno(client->rtx_queue.head->segment.sender_segment.seqno,
+                            client->sender.next_seqno) +
+                   client->rtx_queue.head->segment.sender_segment.len);
+
+        if (client->rtx_queue.head != client->rtx_queue.tail) {
+            printk(" | Last: %u-%u",
+                   unwrap_seqno(client->rtx_queue.tail->segment.sender_segment.seqno,
+                                client->sender.next_seqno),
+                   unwrap_seqno(client->rtx_queue.tail->segment.sender_segment.seqno,
+                                client->sender.next_seqno) +
+                       client->rtx_queue.tail->segment.sender_segment.len);
+        }
+        printk("\n");
+    }
+
+    printk("[CLIENT] Receiver: next=%u, latest_reasm=%u, window=%u, syn=%d, fin=%d\n",
+           client->receiver.next_seqno, client->receiver.latest_seqno_in_reasm,
+           client->receiver.window_size, client->receiver.syn_received,
+           client->receiver.fin_received);
+
+    // Connection state
+    bool sender_active =
+        !bs_reader_finished(&client->sender.reader) || !tcp_rtx_empty(&client->rtx_queue);
+    bool receiver_active = !bs_writer_finished(&client->receiver.writer);
+    bool lingering = client->lingering &&
+                     (timer_get_usec() - client->time_of_last_receipt_us < TIME_WAIT_DURATION_US);
+    printk("[CLIENT] State: sender_active=%d, receiver_active=%d, lingering=%d\n", sender_active,
+           receiver_active, lingering);
+
+    // Server status
+    printk("[SERVER] Sender: seqno=%u, acked=%u, window=%u, in_flight=%u\n",
+           server->sender.next_seqno, server->sender.acked_seqno, server->sender.window_size,
+           server->segs_in_flight);
+
+    if (server->segs_in_flight > 0) {
+        printk("  First in flight: %u-%u",
+               unwrap_seqno(server->rtx_queue.head->segment.sender_segment.seqno,
+                            server->sender.next_seqno),
+               unwrap_seqno(server->rtx_queue.head->segment.sender_segment.seqno,
+                            server->sender.next_seqno) +
+                   server->rtx_queue.head->segment.sender_segment.len);
+
+        if (server->rtx_queue.head != server->rtx_queue.tail) {
+            printk(" | Last: %u-%u",
+                   unwrap_seqno(server->rtx_queue.tail->segment.sender_segment.seqno,
+                                server->sender.next_seqno),
+                   unwrap_seqno(server->rtx_queue.tail->segment.sender_segment.seqno,
+                                server->sender.next_seqno) +
+                       server->rtx_queue.tail->segment.sender_segment.len);
+        }
+        printk("\n");
+    }
+
+    printk("[SERVER] Receiver: next=%u, latest_reasm=%u, window=%u, syn=%d, fin=%d\n",
+           server->receiver.next_seqno, server->receiver.latest_seqno_in_reasm,
+           server->receiver.window_size, server->receiver.syn_received,
+           server->receiver.fin_received);
+
+    // Connection state
+    sender_active =
+        !bs_reader_finished(&server->sender.reader) || !tcp_rtx_empty(&server->rtx_queue);
+    receiver_active = !bs_writer_finished(&server->receiver.writer);
+    lingering = server->lingering &&
+                (timer_get_usec() - server->time_of_last_receipt_us < TIME_WAIT_DURATION_US);
+    printk("[SERVER] State: sender_active=%d, receiver_active=%d, lingering=%d\n", sender_active,
+           receiver_active, lingering);
+}
+
+/**
  * Main loopback test function
  */
 static bool test_tcp_loopback(void) {
-    printk("=== Starting TCP Loopback Test ===\n");
+    printk("=== Starting Unified TCP Loopback Test ===\n");
 
     // Set up the routing table
     setup_routing_table();
@@ -127,83 +179,39 @@ static bool test_tcp_loopback(void) {
     tcp_peer_t client = tcp_peer_init(client_nrf, CLIENT_RCP_ADDR, SERVER_RCP_ADDR, false);
     tcp_peer_t server = tcp_peer_init(server_nrf, SERVER_RCP_ADDR, CLIENT_RCP_ADDR, true);
 
-    printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-           tcp_state_name(server.state));
+    // Initialize connection and prepare to send data
+    printk("Starting unified TCP connection process...\n");
 
-    //---------------------------------------------------------------------
-    // Phase 1: Connection establishment (SYN handshake)
-    //---------------------------------------------------------------------
-    printk("\n--- Phase 1: Connection Establishment ---\n");
-
-    // Client initiates connection
-    printk("Client initiating connection...\n");
+    // Connect client to server (this is just opening the stream)
     if (!tcp_connect(&client)) {
-        printk("ERROR: Failed to initiate connection\n");
-        return false;
-    }
-    printk("Client state after connect: %s\n", tcp_state_name(client.state));
-
-    // Run ticks until connection is established or max iterations reached
-    int iterations = 0;
-    printk("Waiting for connection establishment...\n");
-
-    while ((!tcp_is_established(&client) || !tcp_is_established(&server))) {
-        // Run one round of ticks
-        run_ticks(&client, &server, 1);
-        iterations++;
-
-        // Log progress periodically
-        printk("  Handshake progress (iterations: %d):\n", iterations);
-        printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-               tcp_state_name(server.state));
-    }
-
-    // Check if connection was established
-    if (!tcp_is_established(&client) || !tcp_is_established(&server)) {
-        printk("ERROR: Connection establishment failed after %d iterations\n", iterations);
-        printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-               tcp_state_name(server.state));
+        printk("ERROR: Failed to initialize client connection\n");
         return false;
     }
 
-    printk("Connection established successfully after %d iterations\n", iterations);
-    printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-           tcp_state_name(server.state));
-
-    // Print TCP statistics after connection establishment
-    printk("\n=== TCP Statistics after Connection Establishment ===\n");
-    printk("Client TCP Stats:\n");
-    tcp_print_stats(&client);
-
-    printk("\nServer TCP Stats:\n");
-    tcp_print_stats(&server);
-
-    //---------------------------------------------------------------------
-    // Phase 2: Data transfer
-    //---------------------------------------------------------------------
-    printk("\n--- Phase 2: Data Transfer ---\n");
-
-    // Send test message from client to server
+    // Prepare data to send
     size_t message_len = binary_length;
     uint32_t hash_sent = fast_hash32(binary_data, message_len);
-    printk("Sending %u bytes of data from client to server...\n", message_len);
-    printk("  crc of sent data (nbytes=%u): %x\n", message_len, hash_sent);
+    printk("Data to send: %u bytes, hash: %x\n", message_len, hash_sent);
 
+    // Initially write some data - the SYN will be automatically included in the first segment
     size_t bytes_written = tcp_write(&client, (uint8_t *)binary_data, message_len);
-    printk("Client wrote %u/%u bytes\n", bytes_written, message_len);
-
-    if (bytes_written != message_len) {
-        printk("WARNING: Not all data was queued for sending\n");
-    }
+    printk("Client initially wrote %u/%u bytes\n", bytes_written, message_len);
 
     uint8_t receive_buffer[message_len];
-
-    // Run ticks until all data is transferred or max iterations reached
-    iterations = 0;
     size_t bytes_received = 0;
 
-    printk("Starting data transfer...\n\n");
-    while (bytes_received < message_len) {
+    // Server is passive, close it's end of the connection because it will not send anything
+    tcp_close(&server);
+
+    // The main loop handles everything: connection establishment, data transfer, and termination
+    printk("\n--- Starting Unified TCP Process ---\n");
+    int iterations = 0;
+
+    // Main connection loop: continues running until both endpoints have completed data transfer,
+    // acknowledged all segments, and finished the connection teardown process.
+    while (tcp_is_active(&client) || tcp_is_active(&server)) {
+        // Client: Try to write any remaining data to the TCP connection
+        // This will buffer data in the sender's bytestream for transmission
         size_t remaining_to_send = message_len - bytes_written;
         if (remaining_to_send > 0 && tcp_has_space(&client)) {
             size_t new_bytes_written =
@@ -211,13 +219,19 @@ static bool test_tcp_loopback(void) {
             bytes_written += new_bytes_written;
         }
 
-        // Run ticks
+        // Client: Once all data is successfully written to the bytestream, initiate connection
+        // termination. This signals the end of data transmission but allows the connection to
+        // remain half-open for receiving data from the server until a proper TCP teardown completes
+        if (bytes_written == message_len) {
+            tcp_close(&client);
+        }
+
+        // Run network ticks
         run_ticks(&client, &server, 1);
         iterations++;
 
-        // If the server received data, read it to free up space in the receiver's bytestream
+        // Server: Read any available data in server
         if (tcp_has_data(&server)) {
-            // Read the data into the receive buffer
             size_t bytes_read = tcp_read(&server, receive_buffer + bytes_received,
                                          sizeof(receive_buffer) - bytes_received);
             bytes_received += bytes_read;
@@ -225,211 +239,37 @@ static bool test_tcp_loopback(void) {
 
         // Log progress periodically
         if (iterations % 20 == 0) {
-            printk("\n");
-            printk("Transfer progress (iterations: %d):\n", iterations);
-            printk("  Client has written: %u/%u bytes\n", bytes_written, message_len);
-            printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
-            printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-                   tcp_state_name(server.state));
-
-            // Print the status about the client (sender)
-            printk("Client (sender) status:\n");
-            printk("  Next seqno: %u\n", client.sender.next_seqno);
-            printk("  Acked seqno: %u\n", client.sender.acked_seqno);
-            printk("  Window size: %u\n", client.sender.window_size);
-            // Print the current state of the retransmission queue
-            printk("  Retransmission queue (size: %u):\n", client.segs_in_flight);
-            printk("    Earliest seqno in flight: %u to %u\n",
-                   unwrap_seqno(client.rtx_queue.head->segment.sender_segment.seqno,
-                                client.sender.next_seqno),
-                   unwrap_seqno(client.rtx_queue.head->segment.sender_segment.seqno,
-                                client.sender.next_seqno) +
-                       client.rtx_queue.head->segment.sender_segment.len);
-            printk("    Latest seqno in flight: %u to %u\n",
-                   unwrap_seqno(client.rtx_queue.tail->segment.sender_segment.seqno,
-                                client.sender.next_seqno),
-                   unwrap_seqno(client.rtx_queue.tail->segment.sender_segment.seqno,
-                                client.sender.next_seqno) +
-                       client.rtx_queue.tail->segment.sender_segment.len);
-
-            // Print the status about the server (receiver)
-            printk("Server (receiver) status:\n");
-            printk("  Next seqno: %u\n", server.receiver.next_seqno);
-            printk("  Latest seqno in reasm: %u\n", server.receiver.latest_seqno_in_reasm);
-            printk("  Window size: %u\n", server.receiver.window_size);
+            print_connection_progress(&client, &server, bytes_written, bytes_received, message_len,
+                                      iterations);
         }
     }
 
-    printk("\n");
-    printk("Finished sending in %d iterations\n", iterations);
-    printk("  Server has received: %u/%u bytes\n", bytes_received, message_len);
-    printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-           tcp_state_name(server.state));
+    // Final status
+    printk("\n--- Connection Completed ---\n");
+    print_connection_progress(&client, &server, bytes_written, bytes_received, message_len,
+                              iterations);
 
-    // Print the status about the client (sender)
-    printk("Client (sender) status:\n");
-    printk("  Next seqno: %u\n", client.sender.next_seqno);
-    printk("  Acked seqno: %u\n", client.sender.acked_seqno);
-    printk("  Window size: %u\n", client.sender.window_size);
-
-    // Print the status about the server (receiver)
-    printk("Server (receiver) status:\n");
-    printk("  Next seqno: %u\n", server.receiver.next_seqno);
-    printk("  Window size: %u\n", server.receiver.window_size);
-    printk("  Total size: %u\n", server.receiver.total_size);
-    printk("  Fin received: %d\n", server.receiver.fin_received);
-    printk("\n");
-
-    // Check if data transfer completed
+    // Verify data integrity
     if (bytes_received < message_len) {
-        printk("ERROR: Data transfer failed after %d iterations\n", iterations);
-        printk("Server received %u/%u bytes\n", bytes_received, message_len);
+        printk("ERROR: Data transfer failed. Server received %u/%u bytes\n", bytes_received,
+               message_len);
         return false;
     }
 
-    printk("Data transfer completed successfully after %d iterations\n", iterations);
-
-    receive_buffer[bytes_received] = '\0';  // Null-terminate for printing
     uint32_t hash_received = fast_hash32(receive_buffer, bytes_received);
-    printk("  crc of received data (nbytes=%u): %x\n", bytes_received, hash_received);
-    assert(hash_received == hash_sent);
+    printk("Data verification: sent hash %x, received hash %x\n", hash_sent, hash_received);
 
-    printk("Server read %u bytes\n", bytes_received);
-
-    // Verify data integrity
     bool data_matches =
         (bytes_received == message_len && memcmp(receive_buffer, binary_data, message_len) == 0);
 
-    if (data_matches) {
+    if (data_matches && hash_received == hash_sent) {
         printk("Data verification: SUCCESS!\n");
     } else {
         printk("ERROR: Data verification failed\n");
-        printk("Expected %u bytes, received %u bytes\n", message_len, bytes_received);
         return false;
     }
 
-    // Print TCP statistics after data transfer
-    printk("\n=== TCP Statistics after Data Transfer ===\n");
-    printk("Client TCP Stats:\n");
-    tcp_print_stats(&client);
-
-    printk("\nServer TCP Stats:\n");
-    tcp_print_stats(&server);
-
-    //---------------------------------------------------------------------
-    // Phase 3: Connection termination (FIN handshake)
-    //---------------------------------------------------------------------
-    printk("\n--- Phase 3: Connection Termination ---\n");
-
-    // Client initiates connection close
-    printk("Client initiating connection close...\n");
-    tcp_close(&client);
-
-    // Run ticks until client's FIN is acknowledged
-    iterations = 0;
-    bool client_fin_acked = false;
-
-    printk("Waiting for client FIN to be acknowledged...\n");
-    while (!client_fin_acked) {
-        run_ticks(&client, &server, 1);
-        iterations++;
-
-        // Check if client FIN has been acknowledged
-        if (client.state == TCP_FIN_WAIT_2 && server.state == TCP_CLOSE_WAIT) {
-            client_fin_acked = true;
-        }
-
-        // Log progress periodically
-        if (iterations % 10 == 0) {
-            printk("  Client FIN progress (iterations: %d):\n", iterations);
-            printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-                   tcp_state_name(server.state));
-        }
-    }
-
-    if (!client_fin_acked) {
-        printk("ERROR: Client FIN not acknowledged after %d iterations\n", iterations);
-        printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-               tcp_state_name(server.state));
-        return false;
-    }
-
-    printk("Client FIN acknowledged after %d iterations\n", iterations);
-    printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-           tcp_state_name(server.state));
-
-    // Server closes its end
-    printk("Server initiating connection close...\n");
-    tcp_close(&server);
-
-    // Run ticks until the connection is fully terminated
-    iterations = 0;
-    bool connection_terminated = false;
-
-    printk("Waiting for full connection termination...\n");
-    while (!connection_terminated && iterations < TIME_WAIT_ITERATIONS) {
-        run_ticks(&client, &server, 1);
-        iterations++;
-
-        // Check if connection is fully terminated
-        if (!tcp_is_active(&client) && !tcp_is_active(&server)) {
-            connection_terminated = true;
-        }
-
-        // Log progress periodically
-        if (iterations % 50 == 0) {
-            printk("Termination progress (iterations: %d):\n", iterations);
-            printk("    Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-                   tcp_state_name(server.state));
-            printk("    Client active: %d, Server active: %d\n", tcp_is_active(&client),
-                   tcp_is_active(&server));
-        }
-    }
-
-    // Check if termination was successful
-    if (!connection_terminated) {
-        printk("WARNING: Connection not fully terminated after %d iterations\n", iterations);
-        printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-               tcp_state_name(server.state));
-        printk("Client active: %d, Server active: %d\n", tcp_is_active(&client),
-               tcp_is_active(&server));
-    } else {
-        printk("Connection terminated successfully after %d iterations\n", iterations);
-        printk("Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-               tcp_state_name(server.state));
-    }
-
-    // Print TCP statistics after connection termination
-    printk("\n=== TCP Statistics after Connection Termination ===\n");
-    printk("Client TCP Stats:\n");
-    tcp_print_stats(&client);
-
-    printk("\nServer TCP Stats:\n");
-    tcp_print_stats(&server);
-
-    // Clean up resources
-    tcp_cleanup(&client);
-    tcp_cleanup(&server);
-
-    printk("Final States");
-    printk("  Client state: %s, Server state: %s\n", tcp_state_name(client.state),
-           tcp_state_name(server.state));
-
-    // Print the status about the client (sender)
-    printk("  Client (sender) status:\n");
-    printk("    Next seqno: %u\n", client.sender.next_seqno);
-    printk("    Acked seqno: %u\n", client.sender.acked_seqno);
-    printk("    Window size: %u\n", client.sender.window_size);
-
-    // Print the status about the server (receiver)
-    printk("  Server (receiver) status:\n");
-    printk("    Next seqno: %u\n", server.receiver.next_seqno);
-    printk("    Window size: %u\n", server.receiver.window_size);
-    printk("    Total size: %u\n", server.receiver.total_size);
-    printk("    Fin received: %d\n", server.receiver.fin_received);
-    printk("\n");
-
-    // Print TCP statistics
+    // Print final statistics
     printk("\n=== TCP Connection Statistics ===\n");
     printk("Client TCP Stats:\n");
     tcp_print_stats(&client);
