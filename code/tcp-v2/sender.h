@@ -6,7 +6,7 @@
 /********* TYPES *********/
 
 // Sender's initial window size (before any ACKs are received)
-#define INITIAL_WINDOW_SIZE 1024
+#define INITIAL_WINDOW_SIZE 64
 
 /* Sender state structure */
 typedef struct sender {

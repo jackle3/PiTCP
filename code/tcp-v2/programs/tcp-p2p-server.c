@@ -18,7 +18,7 @@
 // Test parameters
 #define PROGRESS_INTERVAL 1024           // How often to print progress (in ticks)
 #define MAX_FILE_SIZE (4 * 1024 * 1024)  // 4MB maximum file size
-// #define TICK_DELAY_MS 10                 // Delay between ticks in milliseconds
+#define TICK_DELAY_MS 1                  // Delay between ticks in milliseconds
 
 /**
  * Print file transfer progress
@@ -88,7 +88,7 @@ static bool receive_file_over_tcp(void) {
     while (tcp_is_active(&peer)) {
         // Process network events
         tcp_tick(&peer);
-        // delay_ms(TICK_DELAY_MS);
+        delay_ms(TICK_DELAY_MS);
         iterations++;
 
         // Check for incoming data

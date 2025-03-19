@@ -4,6 +4,7 @@ PROGS += tests/test-tcp-loopback-file.c
 PROGS += programs/tcp-router.c
 PROGS += programs/tcp-p2p-client.c
 PROGS += programs/tcp-p2p-server.c
+PROGS += programs/tcp-uart.c
 
 LIBS += $(CS140E_PITCP)/lib/libgcc.a
 

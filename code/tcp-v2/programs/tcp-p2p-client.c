@@ -17,7 +17,7 @@
 
 // Test parameters
 #define PROGRESS_INTERVAL 1024  // How often to print progress (in ticks)
-// #define TICK_DELAY_MS 10       // Delay between ticks in milliseconds
+#define TICK_DELAY_MS 1         // Delay between ticks in milliseconds
 
 // Select test data to send (uncomment one)
 // #include "byte-array-hello.h"
@@ -113,7 +113,7 @@ static bool send_file_over_tcp(void) {
     while (tcp_is_active(&peer)) {
         // Process network events
         tcp_tick(&peer);
-        // delay_ms(TICK_DELAY_MS);
+        delay_ms(TICK_DELAY_MS);
         iterations++;
 
         // Try to send more data
