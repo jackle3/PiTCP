@@ -37,15 +37,15 @@ void notmain(void) {
     kmalloc_init(64);
     uart_init();
 
+    // Router receives with the server nrf
     printk("[ROUTER] Configuring no-ack server=[%x] with %d nbyte msgs\n", router_server_addr,
            RCP_TOTAL_SIZE);
     nrf_t *s = router_mk_noack(router_server_addr, RCP_TOTAL_SIZE);
-    // nrf_dump("unreliable server config:\n", s);
 
+    // Router sends with the client nrf
     printk("[ROUTER] Configuring no-ack client=[%x] with %d nbyte msg\n", router_client_addr,
            RCP_TOTAL_SIZE);
     nrf_t *c = client_mk_noack(router_client_addr, RCP_TOTAL_SIZE);
-    // nrf_dump("unreliable client config:\n", c);
 
     // Check compatibility
     if (!nrf_compat(c, s))

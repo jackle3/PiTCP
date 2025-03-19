@@ -111,24 +111,6 @@ static inline tcp_stats_t tcp_stats_init(void) {
 static inline void tcp_update_send_stats(tcp_peer_t *peer, tcp_segment_t *segment) {
     peer->stats.segments_sent++;
 
-    // // Print info about the segment
-    // printk("  [TCP %x] Sending segment: ", peer->sender.local_addr);
-    // if (segment->has_sender_segment) {
-    //     printk("seqno=%u ", segment->sender_segment.seqno);
-    //     if (segment->sender_segment.is_syn)
-    //         printk("syn=1 ");
-    //     if (segment->sender_segment.is_fin)
-    //         printk("fin=1 ");
-    //     printk("len=%u ", segment->sender_segment.len);
-    // }
-    // if (segment->has_receiver_segment) {
-    //     printk("ackno=%u ", segment->receiver_segment.ackno);
-    //     if (segment->receiver_segment.is_ack)
-    //         printk("ack=1 ");
-    //     printk("window=%u ", segment->receiver_segment.window_size);
-    // }
-    // printk("\n");
-
     if (segment->has_sender_segment) {
         if (segment->sender_segment.len > 0) {
             peer->stats.data_segments_sent++;
@@ -354,9 +336,6 @@ static inline void tcp_default_send_callback(nrf_t *nrf, uint8_t src, uint8_t ds
     // Get the next hop NRF address from the routing table
     uint32_t next_hop_nrf = rtable_map[src][dst];
 
-    DEBUG_PRINT(" [NRF] Sending data from %u (nrf: %x) to %u (nrf: %x)\n", src, nrf->rxaddr, dst,
-                next_hop_nrf);
-
     // Send the data via NRF
     nrf_send_noack(nrf, next_hop_nrf, data, len);
 }
@@ -384,6 +363,11 @@ static inline tcp_peer_t tcp_peer_init(nrf_t *nrf, uint8_t local_addr, uint8_t r
                        .consec_retransmits = -1, /* Initialize to -1 to indicate not started */
                        .time_of_last_receipt_us = 0,
                        .stats = tcp_stats_init()}; /* Initialize stats */
+
+    // Get the next hop NRF address from the routing table
+    uint32_t next_hop_nrf = rtable_map[local_addr][remote_addr];
+    printk("  [TCP] Initialized TCP with local addr %u (nrf: %x) and remote addr %u (nrf: %x)\n",
+           local_addr, nrf->rxaddr, remote_addr, next_hop_nrf);
 
     // Initialize retransmission queue
     tcp_rtx_init(&peer.rtx_queue);
@@ -613,9 +597,6 @@ static inline void tcp_process_segment(tcp_peer_t *peer, tcp_segment_t *segment)
     assert(peer);
     assert(segment);
 
-    // Update time of last receipt
-    peer->time_of_last_receipt_us = timer_get_usec();
-
     // Did the inbound stream finish before the outbound stream? If so, no need to linger after
     // streams finish.
     if (bs_writer_finished(&peer->receiver.writer) && !bs_reader_finished(&peer->sender.reader)) {
@@ -777,6 +758,9 @@ static inline void tcp_tick(tcp_peer_t *peer) {
 
         // Convert to TCP segment
         tcp_segment_t segment = rcp_to_tcp_segment(&datagram);
+
+        // Update time of last receipt
+        peer->time_of_last_receipt_us = current_time;
 
         // Process the segment
         tcp_process_segment(peer, &segment);

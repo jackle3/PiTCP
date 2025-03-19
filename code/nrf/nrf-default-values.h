@@ -26,10 +26,10 @@ enum
     router_client_addr = 0xe1e1e1,
 
     // used for tcp-v2
-    nrf_addr_1 = 0xe5e5e5,
-    nrf_addr_2 = 0xd3d3d3,
-    nrf_addr_3 = 0xe1e1e1,
-    nrf_addr_router = 0xe7e7e7,
+    nrf_user_1_addr = 0xe5e5e5,
+    nrf_user_2_addr = 0xe7e7e7,
+    nrf_router_server_addr = 0xd3d3d3,
+    nrf_router_client_addr = 0xe1e1e1,
 };
 
 enum

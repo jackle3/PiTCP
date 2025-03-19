@@ -13,9 +13,9 @@
  * - RCP address 2 should route to the second user (receiver))
  */
 static uint32_t router_rtable[256] = {
-    [0] = 0,          /* Router itself */
-    [1] = nrf_addr_1, /* First server */
-    [2] = nrf_addr_2  /* Second server */
+    [0] = 0,               /* Goes nowhere */
+    [1] = nrf_user_1_addr, /* Route to first server */
+    [2] = nrf_user_2_addr  /* Route to second server */
 };
 
 /**
@@ -25,9 +25,10 @@ static uint32_t router_rtable[256] = {
  * - RCP address 2 should route to the router's server (receiver)
  */
 static uint32_t user1_rtable[256] = {
-    [0] = nrf_addr_router, /* Router itself */
-    [1] = 0,               /* First server */
-    [2] = nrf_addr_2       /* Second server */
+    [0] = nrf_router_server_addr, /* Route to router */
+    [1] = 0,                      /* Goes nowhere */
+    // [2] = nrf_router_server_addr  /* Route to router */
+    [2] = nrf_user_2_addr /* Route directly to user 2 */
 };
 
 /**
@@ -37,9 +38,10 @@ static uint32_t user1_rtable[256] = {
  * - RCP address 2 is the user itself
  */
 static uint32_t user2_rtable[256] = {
-    [0] = nrf_addr_router, /* Router itself */
-    [1] = nrf_addr_1,      /* First server */
-    [2] = 0                /* Second server */
+    [0] = nrf_router_server_addr, /* Route to router */
+    // [1] = nrf_router_server_addr, /* Route to router */
+    [1] = nrf_user_1_addr, /* Route directly to user 1 */
+    [2] = 0                /* Goes nowhere */
 };
 
 /**
@@ -49,14 +51,13 @@ static uint32_t user2_rtable[256] = {
  * - RCP address 2 maps to user2_rtable
  */
 static uint32_t *rtable_map[256] = {
-    [0] = router_rtable, 
-    [1] = user1_rtable, 
-    [2] = user2_rtable
+    [0] = router_rtable,
+    [1] = user1_rtable,
+    [2] = user2_rtable,
 };
 
-
 static uint32_t rcp_to_nrf[256] = {
-    [0] = nrf_addr_router,
-    [1] = nrf_addr_1,
-    [2] = nrf_addr_2
+    [0] = nrf_router_server_addr,
+    [1] = nrf_user_1_addr,
+    [2] = nrf_user_2_addr,
 };
