@@ -18,13 +18,11 @@
 #define CLIENT_RCP_ADDR 0x1
 #define SERVER_RCP_ADDR 0x2
 
-// NRF addresses for client and server
+// NRF addresses for client and server (hardcoded for loopback)
 #define CLIENT_NRF_ADDR client_addr
 #define SERVER_NRF_ADDR server_addr
 
-// Test parameters
-#define MAX_ITERATIONS 2000
-#define TICK_DELAY_MS 10  // Delay between ticks in milliseconds
+#define PROGRESS_INTERVAL 1024  // How often to print progress (in ticks)
 
 // Test data to send
 // #include "byte-array-hello.h"
@@ -34,12 +32,9 @@
 /**
  * Helper function to run ticks on both TCP peers
  */
-static void run_ticks(tcp_peer_t *client, tcp_peer_t *server, int count) {
-    for (int i = 0; i < count; i++) {
-        tcp_tick(client);
-        tcp_tick(server);
-        // delay_ms(TICK_DELAY_MS);
-    }
+static void run_ticks(tcp_peer_t *client, tcp_peer_t *server) {
+    tcp_tick(client);
+    tcp_tick(server);
 }
 
 /**
@@ -227,7 +222,7 @@ static bool test_tcp_loopback(void) {
         }
 
         // Run network ticks
-        run_ticks(&client, &server, 1);
+        run_ticks(&client, &server);
         iterations++;
 
         // Server: Read any available data in server
@@ -238,7 +233,7 @@ static bool test_tcp_loopback(void) {
         }
 
         // Log progress periodically
-        if (iterations % 20 == 0) {
+        if (iterations % PROGRESS_INTERVAL == 0) {
             print_connection_progress(&client, &server, bytes_written, bytes_received, message_len,
                                       iterations);
         }

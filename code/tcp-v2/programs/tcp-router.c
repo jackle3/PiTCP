@@ -2,16 +2,15 @@
 #include "router.h"
 #include "tcp.h"
 
-#define PACKET_SIZE RCP_TOTAL_SIZE
 #define ROUTER_RCP_ADDR 0
 
 // busy loop, and check nrf_read_exact_timeout, if we have a packet then parse the packet
 // as a datagram and route it to correct destination based on the destination address
 void route_messages(nrf_t *server, nrf_t *client) {
-    uint8_t buffer[PACKET_SIZE];
+    uint8_t buffer[RCP_TOTAL_SIZE];
 
     while (1) {
-        int bytes_read = nrf_read_exact_timeout(server, buffer, PACKET_SIZE, 1000);
+        int bytes_read = nrf_read_exact_timeout(server, buffer, RCP_TOTAL_SIZE, 1000);
         if (bytes_read > 0) {
             // Parse the datagram
             rcp_datagram_t dgram = rcp_datagram_init();

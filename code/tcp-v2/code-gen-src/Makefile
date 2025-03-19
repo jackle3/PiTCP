@@ -1,6 +1,6 @@
-PROGS = code-gen.c
+PROGS = code-gen.c gen-file.c
 
-SRCS = hello.bin 1mb-file.txt small-file.txt
+SRCS = hello.bin 1mb-file.txt small-file.txt generated-5000.bin
 
 # Generate byte-array headers for all source files
 ALL = $(CODE_GEN) $(SRCS) $(patsubst %.bin,byte-array-%.h,$(filter %.bin,$(SRCS))) $(patsubst %.txt,byte-array-%.h,$(filter %.txt,$(SRCS)))
