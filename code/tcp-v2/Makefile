@@ -1,6 +1,7 @@
 # PROGS += tests/test-bytestream.c
 # PROGS += tests/test-tcp-loopback.c
 PROGS += tests/test-tcp-loopback-file.c
+PROGS += tests/test-uart.c
 PROGS += programs/tcp-router.c
 PROGS += programs/tcp-p2p-client.c
 PROGS += programs/tcp-p2p-server.c

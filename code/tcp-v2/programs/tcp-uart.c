@@ -15,7 +15,7 @@
 // Buffer sizes
 #define UART_BUFFER_SIZE 4096
 #define TCP_READ_BUFFER_SIZE 4096  // hopefully user won't send more than this
-#define TICK_DELAY_MS 1           // Delay between ticks in milliseconds
+#define TICK_DELAY_MS 5            // Delay between ticks in milliseconds
 
 // Command definitions
 #define CMD_QUIT ":quit"
@@ -124,10 +124,8 @@ static uint8_t get_number_from_uart(void) {
         }
 
         char c = uart_get8();
-        uart_put8(c);  // Echo
 
         if (c == '\r' || c == '\n') {
-            uart_put8('\n');
             buffer[pos] = '\0';
             break;
         }
@@ -151,10 +149,10 @@ static void run_tcp_chat(void) {
     printk("UART initialized\n");
 
     // Get RCP addresses from user
-    printk("Enter your RCP address (decimal or hex with 0x prefix): ");
+    printk("Enter your RCP address (0 to 255): ");
     uint8_t my_rcp_addr = get_number_from_uart();
 
-    printk("Enter destination RCP address: ");
+    printk("Enter destination RCP address (0 to 255): ");
     uint8_t peer_rcp_addr = get_number_from_uart();
 
     printk("Using RCP addresses: local=%u (0x%x), remote=%u (0x%x)\n", my_rcp_addr, my_rcp_addr,
@@ -191,9 +189,30 @@ static void run_tcp_chat(void) {
             return;
         }
         printk("Connecting to peer %u...\n", peer_rcp_addr);
+
+        while (tcp_is_active(&peer)) {
+            tcp_tick(&peer);
+            delay_ms(TICK_DELAY_MS);
+
+            // Client: once we've sent a SYN and received an ACK, connection is established
+            if (peer.sender.acked_seqno > 0) {
+                break;
+            }
+        }
     } else {
         printk("Waiting for peer %u to connect...\n", peer_rcp_addr);
+        while (tcp_is_active(&peer)) {
+            tcp_tick(&peer);
+            delay_ms(TICK_DELAY_MS);
+
+            // Server: once we've received a SYN from client and sent our own SYN
+            if (peer.receiver.syn_received && peer.sender.next_seqno > 0) {
+                break;
+            }
+        }
     }
+
+    printk("\n\n>>>>>>> Connection established <<<<<<<\n\n");
 
     // Buffers for UART input and TCP receive
     char uart_buffer[UART_BUFFER_SIZE];
@@ -214,6 +233,7 @@ static void run_tcp_chat(void) {
 
         // Check for incoming UART data
         if (uart_has_data()) {
+            printk("UART has data\n");
             while (1) {
                 char c = uart_get8();
 
@@ -235,6 +255,7 @@ static void run_tcp_chat(void) {
 
         // Handle the input line (either command or insert into TCP to send)
         if (uart_buffer_pos > 0) {
+            printk("Handling input line\n");
             bool continue_chat = handle_input_line(&peer, uart_buffer, uart_buffer_pos);
             if (!continue_chat) {
                 quit_requested = true;
@@ -249,10 +270,11 @@ static void run_tcp_chat(void) {
                                      TCP_READ_BUFFER_SIZE - output_buffer_pos);
 
         if (bytes_read > 0) {
+            printk("Bytes read: %u\n", bytes_read);
             output_buffer_pos += bytes_read;
 
             // Debug output
-            printk("Bytes read: %u, output buffer pos: %u\n", bytes_read, output_buffer_pos);
+            // printk("Bytes read: %u, output buffer pos: %u\n", bytes_read, output_buffer_pos);
 
             // If the message ends in a newline, null-terminate the buffer
             if (tcp_buffer[output_buffer_pos - 1] == '\n') {
