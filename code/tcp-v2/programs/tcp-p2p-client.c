@@ -16,14 +16,15 @@
 #define PEER_RCP_ADDR 0x2
 
 // Test parameters
-#define PROGRESS_INTERVAL 1024  // How often to print progress (in ticks)
+#define PROGRESS_INTERVAL 512  // How often to print progress (in ticks)
 #define TICK_DELAY_MS 5         // Delay between ticks in milliseconds
 
 // Select test data to send (uncomment one)
 // #include "byte-array-hello.h"
 // #include "byte-array-small-file.h"
 // #include "byte-array-1mb-file.h"
-#include "byte-array-generated-5000.h"
+// #include "byte-array-generated-5000.h"
+#include "byte-array-generated-20000.h"
 
 /**
  * Print file transfer progress
@@ -108,7 +109,7 @@ static bool send_file_over_tcp(void) {
     size_t bytes_written = 0;
     int iterations = 0;
     bool connection_closed = false;
-
+    bool connection_established = false;
     printk("\n--- Starting File Transfer ---\n");
 
     // Main transfer loop
@@ -117,6 +118,11 @@ static bool send_file_over_tcp(void) {
         tcp_tick(&peer);
         delay_ms(TICK_DELAY_MS);
         iterations++;
+
+        if (!connection_established && peer.sender.acked_seqno > 0) {
+            connection_established = true;
+            printk("\n\n>>>>>>> Connection established <<<<<<<\n\n");
+        }
 
         // Try to send more data
         size_t remaining_to_send = file_size - bytes_written;

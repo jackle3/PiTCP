@@ -16,7 +16,7 @@
 #define PEER_RCP_ADDR 0x1
 
 // Test parameters
-#define PROGRESS_INTERVAL 1024           // How often to print progress (in ticks)
+#define PROGRESS_INTERVAL 512           // How often to print progress (in ticks)
 #define MAX_FILE_SIZE (4 * 1024 * 1024)  // 4MB maximum file size
 #define TICK_DELAY_MS 5                  // Delay between ticks in milliseconds
 
@@ -81,6 +81,7 @@ static bool receive_file_over_tcp(void) {
     size_t bytes_received = 0;
     int iterations = 0;
     bool connection_closed = false;
+    bool connection_established = false;
 
     printk("\n--- Waiting for Incoming Connection ---\n");
 
@@ -90,6 +91,11 @@ static bool receive_file_over_tcp(void) {
         tcp_tick(&peer);
         delay_ms(TICK_DELAY_MS);
         iterations++;
+
+        if (!connection_established && peer.receiver.syn_received && peer.sender.next_seqno > 0) {
+            connection_established = true;
+            printk("\n\n>>>>>>> Connection established <<<<<<<\n\n");
+        }
 
         // Check for incoming data
         size_t bytes_available = tcp_bytes_available(&peer);
