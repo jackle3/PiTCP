@@ -21,6 +21,8 @@
 
 // Select test data to send (uncomment one)
 // #include "byte-array-hello.h"
+// #include "byte-array-small-file.h"
+// #include "byte-array-1mb-file.h"
 #include "byte-array-generated-5000.h"
 
 /**

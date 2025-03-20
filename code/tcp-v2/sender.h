@@ -16,6 +16,7 @@ typedef struct sender {
     uint32_t next_seqno;  /* Next absolute sequence number to send */
     uint32_t acked_seqno; /* Sequence number of the highest absolute acked segment */
     uint16_t window_size; /* Receiver's advertised window size */
+    uint32_t dup_ack_cnt; /* Number of duplicate ACKs received */
 } sender_t;
 
 /********* SENDER *********/
@@ -33,6 +34,7 @@ static inline sender_t sender_init(uint8_t local_addr, uint8_t remote_addr) {
         .next_seqno = 0,
         .acked_seqno = 0,
         .window_size = INITIAL_WINDOW_SIZE,
+        .dup_ack_cnt = 0,
         .local_addr = local_addr,
         .remote_addr = remote_addr,
     };
@@ -125,8 +127,14 @@ static inline void sender_process_ack(sender_t *sender, receiver_segment_t *repl
             return;
         }
 
-        // Update highest acknowledged sequence number
-        sender->acked_seqno = abs_ackno;
+        // If this is a new ACK, update the state and reset dup_ack_cnt
+        if (abs_ackno > sender->acked_seqno) {
+            sender->acked_seqno = abs_ackno;
+            sender->dup_ack_cnt = 0;
+        } else {
+            // Otherwise, this is a duplicate ACK, so increment the counter
+            sender->dup_ack_cnt++;
+        }
     }
 
     // Update window size from receiver

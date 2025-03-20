@@ -487,7 +487,9 @@ static inline void tcp_send_segment(tcp_peer_t *peer, tcp_segment_t *segment, bo
 }
 
 /**
- * Process an incoming ACK segment
+ * Process an incoming ACK segment. In the general case, this function only updates
+ * the stored acknowledged sequence number in the sender. However, if we are receiving
+ * many duplicate ACKs, we will fast retransmit the oldest unacknowledged segment.
  *
  * @param peer The TCP peer processing the segment
  * @param segment The segment to process
@@ -532,6 +534,16 @@ static inline void tcp_process_recv_segment(tcp_peer_t *peer, tcp_segment_t *seg
         new_data_acked = true;
     }
 
+    // If we received a duplicate ACK, fast retransmit the oldest unacknowledged segment
+    if (peer->sender.dup_ack_cnt >= 3) {
+        VERBOSE_PRINT("  [TCP %x] Received 3 duplicate ACKs, fast retransmitting\n",
+                      peer->sender.local_addr);
+
+        // Send the oldest unacknowledged segment
+        unacked_tcp_segment_t *rtx_seg = tcp_rtx_start(&peer->rtx_queue);
+        tcp_send_segment(peer, &rtx_seg->segment, false);
+    }
+
     // If new data was acknowledged, reset the retransmission timer
     if (new_data_acked) {
         DEBUG_PRINT("  [TCP %x] New data acknowledged, resetting RTO\n", peer->sender.local_addr);
@@ -547,7 +559,9 @@ static inline void tcp_process_recv_segment(tcp_peer_t *peer, tcp_segment_t *seg
 }
 
 /**
- * Process an incoming data segment
+ * Process an incoming data segment. This function will send this to the receiver to produce
+ * an ACK response if necessary. If the receiver ACKs the data, we will try to piggyback on
+ * sender data as well to reduce the number of segments sent.
  *
  * @param peer The TCP peer processing the segment
  * @param segment The segment to process
