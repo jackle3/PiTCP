@@ -18,7 +18,7 @@
 // Test parameters
 #define PROGRESS_INTERVAL 1024           // How often to print progress (in ticks)
 #define MAX_FILE_SIZE (4 * 1024 * 1024)  // 4MB maximum file size
-#define TICK_DELAY_MS 1                  // Delay between ticks in milliseconds
+#define TICK_DELAY_MS 5                  // Delay between ticks in milliseconds
 
 /**
  * Print file transfer progress

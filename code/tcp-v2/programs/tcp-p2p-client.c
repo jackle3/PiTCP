@@ -17,7 +17,7 @@
 
 // Test parameters
 #define PROGRESS_INTERVAL 1024  // How often to print progress (in ticks)
-#define TICK_DELAY_MS 1         // Delay between ticks in milliseconds
+#define TICK_DELAY_MS 5         // Delay between ticks in milliseconds
 
 // Select test data to send (uncomment one)
 // #include "byte-array-hello.h"
