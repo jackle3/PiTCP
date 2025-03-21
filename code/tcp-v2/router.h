@@ -27,8 +27,8 @@ static uint32_t router_rtable[256] = {
 static uint32_t user1_rtable[256] = {
     [0] = nrf_router_server_addr, /* Route to router */
     [1] = 0,                      /* Goes nowhere */
-    // [2] = nrf_router_server_addr  /* Route to router */
-    [2] = nrf_user_2_addr /* Route directly to user 2 */
+    [2] = nrf_router_server_addr  /* Route to router */
+    // [2] = nrf_user_2_addr /* Route directly to user 2 */
 };
 
 /**
@@ -39,8 +39,8 @@ static uint32_t user1_rtable[256] = {
  */
 static uint32_t user2_rtable[256] = {
     [0] = nrf_router_server_addr, /* Route to router */
-    // [1] = nrf_router_server_addr, /* Route to router */
-    [1] = nrf_user_1_addr, /* Route directly to user 1 */
+    [1] = nrf_router_server_addr, /* Route to router */
+    // [1] = nrf_user_1_addr, /* Route directly to user 1 */
     [2] = 0                /* Goes nowhere */
 };
 
