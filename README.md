@@ -10,7 +10,7 @@ The implementation includes several components:
 - `tcp-v2/tcp-p2p-server` - A server that can receive a file from a client.
 - `tcp-v2/tcp-loopback-file` - A program that tests the maximum possible throughput of the TCP implementation by sending a file in a loopback scenario (i.e. the client and server are on the same Pi).
 
-## Setup
+# Setup
 
 Add the following to your `.zshrc` or `.bashrc` file:
 
@@ -21,7 +21,7 @@ export CS140E_PITCP="path/to/your/repo"
 
 If you don't know the path, run `sh get_export.sh` from the `./PiTCP` directory.
 
-## Usage
+# Usage
 
 - To run the UART program, run `make` inside `code/tcp-v2` and then run `my-install programs/tcp-uart.bin`.
 - To run the router, run `make` inside `code/tcp-v2` and then run `my-install programs/tcp-router.bin`.
@@ -30,15 +30,16 @@ If you don't know the path, run `sh get_export.sh` from the `./PiTCP` directory.
   - The server should run `my-install programs/tcp-p2p-server.bin`.
 - To test in a loopback scenario (i.e. maximum possible throughput), run `my-install tests/tcp-loopback-file.bin`.
 
-## TCP Implementation Details
+# TCP Implementation Details
 
 Our TCP implementation is built on top of a novel protocol called RCP (Raspberry-Pi Communication Protocol), which is designed to fit within the 32-byte size constraint of nRF radio packets while maintaining essential TCP/IP functionality.
 
-### RCP Protocol
+## RCP Protocol
 
 RCP (Reliable Communication Protocol) is a custom protocol that combines TCP and IP functionality:
 
 - **Packet Format**: 32-byte fixed size packets
+
   - 9-byte header containing:
     - Checksum (1 byte)
     - Combined source/destination addresses (1 byte)
@@ -55,16 +56,18 @@ RCP (Reliable Communication Protocol) is a custom protocol that combines TCP and
   - Checksum for error detection
   - Routing support through 4-bit addresses
 
-### TCP State Machine
+## TCP State Machine
 
 The implementation follows the standard TCP state machine:
 
 1. **Connection Establishment (3-way handshake)**:
+
    - Client sends SYN
    - Server responds with SYN-ACK
    - Client acknowledges with ACK
 
 2. **Data Transfer**:
+
    - Reliable delivery using sequence numbers and acknowledgments
    - Flow control with sliding window
    - Fast retransmit after 3 duplicate ACKs
@@ -75,21 +78,24 @@ The implementation follows the standard TCP state machine:
    - Full four-way handshake
    - TIME_WAIT state (2 seconds) to ensure reliable closure
 
-### Key Features
+## Key Features
 
 1. **Reliability**:
+
    - Sequence numbers for ordering
    - Acknowledgments for reliability
    - Retransmission queue for unacknowledged segments
    - Configurable retransmission timeout (RTO)
 
 2. **Flow Control**:
+
    - Sliding window protocol
    - Dynamic window sizing
    - Maximum window size of 128 bytes
    - Bytestream abstraction for data transfer
 
 3. **Performance Optimizations**:
+
    - Fast retransmit on triple duplicate ACKs
    - Efficient segment reassembly
    - Piggyback acknowledgments when possible
@@ -101,23 +107,26 @@ The implementation follows the standard TCP state machine:
    - Throughput measurements
    - Connection state monitoring
 
-### Architecture
+## Architecture
 
 The implementation is modular with several key components:
 
 1. **TCP Peer**: Main connection endpoint managing:
+
    - Connection state
    - Segment processing
    - Retransmission handling
    - Statistics collection
 
 2. **Sender**: Handles outbound data:
+
    - Sequence number management
    - Window size tracking
    - Segment creation
    - Retransmission decisions
 
 3. **Receiver**: Manages inbound data:
+
    - In-order delivery
    - Segment reassembly
    - Window advertisement
@@ -128,21 +137,24 @@ The implementation is modular with several key components:
    - Route table management
    - Multi-hop support
 
-### Usage Examples
+## Usage Examples
 
 The implementation includes several example applications:
 
 1. **TCP UART Chat** (`tcp-uart`):
+
    - Interactive chat between two peers
    - Real-time message exchange
    - Connection statistics display
 
 2. **TCP File Transfer** (`tcp-p2p-client/server`):
+
    - Reliable file transfer between peers
    - Progress monitoring
    - Data integrity verification
 
 3. **TCP Router** (`tcp-router`):
+
    - Multi-peer message routing
    - Address-based forwarding
    - Connection multiplexing
