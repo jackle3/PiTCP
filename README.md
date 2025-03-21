@@ -163,3 +163,4 @@ The implementation includes several example applications:
    - Performance testing
    - Maximum throughput measurement
    - Connection reliability verification
+   - This gist contains the logs from sending 1MB of data: [link](https://gist.github.com/jackle3/cf114f330f67d1dfb9d4da04ff439e73)
